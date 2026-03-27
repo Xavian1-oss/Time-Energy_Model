@@ -311,8 +311,8 @@ if args.features == "S":
     args.enc_in = 1
     args.dec_in = 1
 elif not hasattr(args, 'enc_in') or not hasattr(args, 'dec_in'):
-    
-    if args.features == "MS" and args.data in ["ETTh1", "ETTh2", "ETTm1", "ETTm2"]:
+    # 对 ETT 系列数据，如果是多变量输入（M 或 MS），默认通道数为 7
+    if args.data in ["ETTh1", "ETTh2", "ETTm1", "ETTm2"] and args.features in ["M", "MS"]:
         args.enc_in = 7
         args.dec_in = 7
 
@@ -432,7 +432,8 @@ def run_analysis(
             result_object, dataset = exp.test_adhoc_energy(
                 path_to_given_model,
                 experiment_data=data_to_use,
-                do_run_wide_experiments=True,
+                # 简化版统计不再依赖噪声采样结果，这里关闭宽泛噪声实验以大幅提速
+                do_run_wide_experiments=False,
                 data_loader_name=data_loader_name,
             )
             np.savez(cache_path, **result_object)

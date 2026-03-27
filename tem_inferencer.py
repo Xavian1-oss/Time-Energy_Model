@@ -94,8 +94,18 @@ class TEMInferencer:
         sample_stds: [float] = None,
         inference_optim_steps=0,
     ):
-        if sample_stds is None:
-            sample_stds = [0.1, 0.2, 1.0]
+        # 在测试模式下，为了加速，只使用更少的噪声样本和标准差
+        if hasattr(args, "is_test_mode") and args.is_test_mode == 1:
+            # 限制噪声样本数量
+            num_of_noise_samples = min(num_of_noise_samples, 8)
+            # 限制噪声 std 的取值个数
+            if sample_stds is None:
+                sample_stds = [0.0, 0.1, 0.2]
+            else:
+                sample_stds = list(sample_stds)[:3]
+        else:
+            if sample_stds is None:
+                sample_stds = [0.1, 0.2, 1.0]
 
         mse_energy_std_tuple_list = []
 
@@ -277,8 +287,8 @@ class TEMInferencer:
             start_of_xy = DateUtils.now()
             iter_count += 1
             
-            # Limit iterations in test mode - process just enough data to get meaningful results
-            if hasattr(args, 'is_test_mode') and args.is_test_mode == 1 and iter_count > 10:
+            # Limit iterations in test mode - process fewer batches for faster execution
+            if hasattr(args, 'is_test_mode') and args.is_test_mode == 1 and iter_count > 5:
                 print(f"TEST MODE: Limiting to {iter_count-1} data batches for faster execution")
                 break
 
@@ -619,28 +629,36 @@ class TEMInferencer:
         batch_ys = np.concatenate(list_of_batch_y)
 
         
+        inverse_y_hats_init_orig_model = None
+        inverse_batch_ys = None
+        inverse_mse = None
 
-        batch_x_feature_shape = batch_x.shape[2]
-        inverse_y_hats_init_orig_model = inverse_transform_batched_tensor(
-            torch.tile(
-                torch.from_numpy(y_hats_init_orig_model),
-                dims=[1, 1, batch_x_feature_shape],
+        
+        if args.features in ["S", "MS"]:
+            batch_x_feature_shape = batch_x.shape[2]
+            inverse_y_hats_init_orig_model = inverse_transform_batched_tensor(
+                torch.tile(
+                    torch.from_numpy(y_hats_init_orig_model),
+                    dims=[1, 1, batch_x_feature_shape],
+                )
+            )[:, :, f_dim]
+            inverse_batch_ys = inverse_transform_batched_tensor(
+                torch.tile(
+                    torch.from_numpy(batch_ys),
+                    dims=[1, 1, batch_x_feature_shape],
+                )
+            )[:, :, f_dim]
+            inverse_mse = (
+                torch.mean(
+                    torch.square(
+                        torch.from_numpy(inverse_y_hats_init_orig_model)
+                        - torch.from_numpy(inverse_batch_ys)
+                    ),
+                    dim=1,
+                )
+                .squeeze()
+                .numpy()
             )
-        )[:, :, f_dim]
-        inverse_batch_ys = inverse_transform_batched_tensor(
-            torch.tile(torch.from_numpy(batch_ys), dims=[1, 1, batch_x_feature_shape])
-        )[:, :, f_dim]
-        inverse_mse = (
-            torch.mean(
-                torch.square(
-                    torch.from_numpy(inverse_y_hats_init_orig_model)
-                    - torch.from_numpy(inverse_batch_ys)
-                ),
-                dim=1,
-            )
-            .squeeze()
-            .numpy()
-        )
 
         result_object["energy_values_on_ground_truth"] = energy_values_on_ground_truth
 

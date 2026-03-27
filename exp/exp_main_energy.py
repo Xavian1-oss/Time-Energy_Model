@@ -1350,6 +1350,20 @@ class Exp_Main_Energy(Exp_Basic):
     ):
         
         print(f"[COMPAT] Running exp_main_energy.test_adhoc_energy!")
+
+        # 如果当前整体推断策略是噪声策略，就自动跳过能量优化实验，
+        # 避免在只关心噪声覆盖表现时做大量不必要的优化推断计算。
+        if do_run_energy_optimization_experiments:
+            try:
+                effective_args = self.args if args is None else args
+                if hasattr(effective_args, "test_strategy") and effective_args.test_strategy == "noise":
+                    print(
+                        "[INFO] test_strategy='noise' -> 禁用 do_run_energy_optimization_experiments 以加速结果输出"
+                    )
+                    do_run_energy_optimization_experiments = False
+            except Exception as e:
+                # 出现异常时保持原有行为（即不改变 do_run_energy_optimization_experiments）
+                print(f"[WARN] Failed to adjust optimization experiments flag: {e}")
         return TEMInferencer.test_adhoc_energy(
             args=self.args if args is None else args,
             device=self.device if device is None else device,

@@ -759,328 +759,97 @@ def test_inference_strategy(
 
     return selected_metrics_object_df
 
-
-
 def perform_selective_inference_experiments(
-    result_object: dict,  
-    result_object_train: dict,
-    result_object_test: dict,
-    
-    parent_path_pics: str,
-    train_dataset_scaler,
-    is_different_project=False,
-    parallel_pool_size=None,
-    is_test_mode=False,
-    noisy_std_custom=None,
+        result_object: dict,
+        result_object_train: dict,
+        result_object_test: dict,
+        parent_path_pics: str,
+        train_dataset_scaler,
+        is_different_project=False,
+        parallel_pool_size=None,
+        is_test_mode=False,
+        noisy_std_custom=None,
 ):
+    """Simplified noise-based selective inference using direct energy sorting.
+
+    New behaviour (for TEM noise strategy):
+    - 不再使用噪声采样的 noisy_* 数组，也不做能量分箱。
+    - 直接按能量从低到高排序样本，对一组目标 coverage 取前 k% 样本，
+            在这些样本上计算 MSE，得到 coverage→MSE 曲线。
+
+    返回的 DataFrame 仍然包含 train_coverage、val_mse_selected_model、val_mse_orig_model
+    等列，以兼容后续写 CSV 和打印 summary 的逻辑。
     """
-    Run selective inference experiments with noise-based strategy.
-    
-    This function will run exactly once with the specified parameters and return the result dataframe.
-    """
+
     try:
-        keys_to_extract = [
-            "mse_init_zeros",
-            "mse_init_ground_truth",
-            "mse_init_orig_model",
-            
-            "energy_hats_init_zeros",
-            "energy_hats_init_ground_truth",
-            "energy_hats_init_orig_model",
-            "mse_orig",
-        ]
-        object_for_dataframe = {key: result_object[key] for key in keys_to_extract}
+        # 使用验证集上的能量来确定能量阈值和 empirical coverage
+        val_energy = np.asarray(result_object["energy_hats_init_orig_model"])
+        val_mse_sel = np.asarray(result_object["mse_init_orig_model"])
+        val_mse_orig = np.asarray(result_object["mse_orig"])
 
-        global results_dataframe
-        results_dataframe = pd.DataFrame(object_for_dataframe)
+        # 测试集上的能量和误差（用于最终评估）
+        test_energy = np.asarray(result_object_test["energy_hats_init_orig_model"])
+        test_mse_sel = np.asarray(result_object_test["mse_init_orig_model"])
+        test_mse_orig = np.asarray(result_object_test["mse_orig"])
 
-        combined_object_for_dataframe = {}
-        combined_object_for_dataframe["mse_combined"] = np.concatenate(
-            [
-                results_dataframe["mse_init_zeros"],
-                results_dataframe["mse_init_ground_truth"],
-                results_dataframe["mse_init_orig_model"],
-            ]
-        )
-        combined_object_for_dataframe["energy_hats_combined"] = np.concatenate(
-            [
-                results_dataframe["energy_hats_init_zeros"],
-                results_dataframe["energy_hats_init_ground_truth"],
-                results_dataframe["energy_hats_init_orig_model"],
-            ]
-        )
-        combined_results_dataframe = pd.DataFrame(combined_object_for_dataframe)
+        # 在验证集上按能量排序一次，后面复用排序结果
+        val_order = np.argsort(val_energy)
+        sorted_val_energy = val_energy[val_order]
 
-        before_visualization = DateUtils.now()
+        target_coverages = [0.1, 0.3, 0.5, 0.7, 0.9]
 
-        
-        
-        
+        def build_metrics_for_split(split_name, split_energy, split_mse_sel, split_mse_orig):
+            rows = []
+            n_val = len(sorted_val_energy)
 
-        val_error = result_object_train["mse_init_orig_model"].mean()
-        val_error_orig = result_object_train["mse_orig"].mean()
+            if n_val == 0:
+                return pd.DataFrame(rows)
 
-        if val_error - val_error_orig > 0.05:
-            print(
-                f">>>\n>>>\nWARNING: ERROR MISMATCH!\nebm={val_error} != orig={val_error_orig}>>>\n>>>"
-            )
+            for target_cov in target_coverages:
+                k = max(1, int(round(target_cov * n_val)))
+                k = min(k, n_val)
 
-        error_bounds_percentages = [0.75 + i * 0.025 for i in range(40)]
-        error_bounds = list(map(lambda per: per * val_error, error_bounds_percentages))
+                # 在验证集上确定能量阈值（小于等于该能量的样本被选中）
+                energy_threshold = sorted_val_energy[k - 1]
 
-        
-        
-        
-        
-        
-        
-        
+                val_mask = val_energy <= energy_threshold
+                val_coverage = float(val_mask.sum()) / float(n_val)
 
-        id = 0
+                split_mask = split_energy <= energy_threshold
+                if split_mask.sum() == 0:
+                    # 没有样本被选中时，跳过该点
+                    continue
 
-        stds_to_iterate_unfiltered = np.unique(result_object["noisy_std"])
-        
-        
-        if noisy_std_custom is not None:
-            stds_to_use = [noisy_std_custom]
-            print(f"Using custom noisy_std: {noisy_std_custom}")
-        else:
-            stds_to_use = list(
-                filter(lambda std: std == 0.0 or std >= 0.05, stds_to_iterate_unfiltered)
-            )
-            
-            stds_to_use = [stds_to_use[0]]
-            print(f"Using first available noisy_std: {stds_to_use[0]}")
+                mse_selected = float(split_mse_sel[split_mask].mean())
+                mse_orig_all = float(split_mse_orig.mean())
 
-        
-        LIST_OF_NOISY_SAMPLE_COUNT = [32]  
-
-        
-        are_metrics_logged_dict = {
-            "val": [],
-            "test": [],
-        }
-
-        def log_for_stds(
-            selected_metrics_object_df,
-            noisy_std,
-            step_size,
-            max_number_of_noisy_samples,
-            use_agg,
-            use_energy_centering,
-            dataset_type: str = "val",
-        ):
-            selected_error_bound_percentage_np = selected_metrics_object_df[
-                "selected_error_bound_percentage"
-            ].to_numpy()
-
-            result_stack = np.column_stack(
-                (
-                    selected_error_bound_percentage_np,
-                    selected_metrics_object_df["val_mse_selected_model"].to_numpy(),
-                )
-            )
-
-            
-            series_name = (
-                f"samples={max_number_of_noisy_samples} "
-                f"center={use_energy_centering} "
-                f"agg={use_agg} "
-                f"step_size={step_size}"
-            )
-            Logger.current_logger().report_scatter2d(
-                title=f"Selective inference on '{dataset_type}', std={noisy_std}",
-                series=series_name,
-                iteration=0,
-                scatter=result_stack,
-                xaxis="Error bound percentage",
-                yaxis="MSE selected model",
-            )
-
-            result_stack_count = np.column_stack(
-                (
-                    selected_error_bound_percentage_np,
-                    selected_metrics_object_df["selected_value_count"].to_numpy()
-                    / (
-                        selected_metrics_object_df["selected_value_count"].to_numpy()
-                        + selected_metrics_object_df["filtered_value_count"].to_numpy()
-                    ),
-                )
-            )
-
-            
-            Logger.current_logger().report_scatter2d(
-                title=f"Selective inference proportion of selected on '{dataset_type}', std={noisy_std}",
-                series=series_name,
-                iteration=0,
-                scatter=result_stack_count,
-                xaxis="Error bound percentage",
-                yaxis="Proportion of selected",
-            )
-
-            
-            list_of_similar_logged_selective_inference_params = list(
-                filter(
-                    lambda logged_dict: logged_dict["use_agg"] == use_agg
-                    and logged_dict["noisy_std"] == noisy_std
-                    and logged_dict["use_energy_centering"] == use_energy_centering
-                    and logged_dict["step_size"] == step_size,
-                    are_metrics_logged_dict[dataset_type],
-                )
-            )
-
-            if len(list_of_similar_logged_selective_inference_params) == 0:
-                reference_result_stack = np.column_stack(
-                    (
-                        selected_error_bound_percentage_np,
-                        selected_metrics_object_df["val_mse_orig_model"].to_numpy(),
-                    )
-                )
-
-                
-                series_name = f"Original MSE"
-                Logger.current_logger().report_scatter2d(
-                    title=f"Selective inference on '{dataset_type}', std={noisy_std}",
-                    series=series_name,
-                    iteration=0,
-                    scatter=reference_result_stack,
-                    xaxis="Error bound percentage",
-                    yaxis="MSE selected model",
-                )
-
-            are_metrics_logged_dict[dataset_type].append(
-                {
-                    "noisy_std": noisy_std,
-                    "use_agg": use_agg,
-                    "use_energy_centering": use_energy_centering,
-                    "step_size": step_size,
-                    "max_number_of_noisy_samples": max_number_of_noisy_samples,
+                row = {
+                    "target_coverage": target_cov,
+                    # 为兼容后续打印逻辑，这里字段名仍使用 train_coverage，
+                    # 但实际含义已经是 "验证集上的 empirical coverage"。
+                    "train_coverage": val_coverage,
+                    "val_mse_selected_model": mse_selected,
+                    "val_mse_orig_model": mse_orig_all,
+                    "split": split_name,
                 }
-            )
+                rows.append(row)
 
-        executing_threads = []
-        idx = 0
-        before_execution = DateUtils.now()
+            return pd.DataFrame(rows)
 
-        
-        step_size = 50
-        use_agg = True
-        select_only_one_std = True
-        use_energy_centering = True
-        max_number_of_noisy_samples = LIST_OF_NOISY_SAMPLE_COUNT[0]
-        selection_criteria = "original"
-        
-        
-        if is_test_mode:
-            print("Running in test mode - using reduced step_size and samples")
-            step_size = 10  
-            max_number_of_noisy_samples = min(max_number_of_noisy_samples, 16)  
-        
-        
-        noisy_std = stds_to_use[0]
-        
-        
-        if not use_agg and use_energy_centering:
-            
-            print("Skipping: can only use centering with agg")
-            return None, None, None
+        # 验证集上也算一遍，方便查看；但阈值都是基于验证集本身
+        val_df = build_metrics_for_split("val", val_energy, val_mse_sel, val_mse_orig)
+        # 最终我们主要关心测试集上的表现
+        test_df = build_metrics_for_split("test", test_energy, test_mse_sel, test_mse_orig)
 
-        if use_energy_centering and noisy_std == 0.0:
-            
-            print("Skipping: must have noise for energy centering")
-            return None, None, None
+        print(
+            f"[INFO] Simple energy-sorting selective inference produced "
+            f"{len(val_df)} val rows and {len(test_df)} test rows for coverages {target_coverages}"
+        )
 
-        print(f"Running noise-based inference with: noisy_std={noisy_std}, step_size={step_size}, samples={max_number_of_noisy_samples}")
-        
-        try:
-            
-            test_selected_metrics_object_df = test_inference_strategy(
-                noisy_std,
-                step_size,
-                error_bounds,
-                result_object_train=result_object_train,
-                parent_path_pics=parent_path_pics,
-                select_only_one_std=select_only_one_std,
-                use_agg=use_agg,
-                use_energy_centering=use_energy_centering,
-                id=idx,
-                result_object_to_use=result_object_test,
-                result_object_name="test",
-                error_bounds_percentages=error_bounds_percentages,
-                max_num_of_noisy_samples=max_number_of_noisy_samples,
-                use_other_project=is_different_project,
-                train_dataset_scaler=train_dataset_scaler,
-                selection_criteria=selection_criteria,
-                is_test_mode=is_test_mode,
-            )
-            
-            
-            val_selected_metrics_object_df = test_inference_strategy(
-                noisy_std,
-                step_size,
-                error_bounds,
-                result_object_train=result_object_train,
-                parent_path_pics=parent_path_pics,
-                select_only_one_std=select_only_one_std,
-                use_agg=use_agg,
-                use_energy_centering=use_energy_centering,
-                id=idx,
-                result_object_to_use=result_object,
-                result_object_name="val",
-                error_bounds_percentages=error_bounds_percentages,
-                max_num_of_noisy_samples=max_number_of_noisy_samples,
-                use_other_project=is_different_project,
-                train_dataset_scaler=train_dataset_scaler,
-                selection_criteria=selection_criteria,
-                is_test_mode=is_test_mode,
-            )
-            
-            
-            
-            target_coverages = [0.1, 0.3, 0.5, 0.7, 0.9]  
-            
-            
-            filtered_val_df = pd.DataFrame()
-            filtered_test_df = pd.DataFrame()
-            
-            for target in target_coverages:
-                
-                if not val_selected_metrics_object_df.empty:
-                    
-                    val_selected_metrics_object_df['coverage_diff'] = abs(val_selected_metrics_object_df['train_coverage'] - target)
-                    
-                    closest_row_val = val_selected_metrics_object_df.loc[val_selected_metrics_object_df['coverage_diff'].idxmin()].copy()
-                    
-                    filtered_val_df = pd.concat([filtered_val_df, pd.DataFrame([closest_row_val])], ignore_index=True)
-                
-                
-                if not test_selected_metrics_object_df.empty:
-                    
-                    test_selected_metrics_object_df['coverage_diff'] = abs(test_selected_metrics_object_df['train_coverage'] - target)
-                    
-                    closest_row_test = test_selected_metrics_object_df.loc[test_selected_metrics_object_df['coverage_diff'].idxmin()].copy()
-                    
-                    filtered_test_df = pd.concat([filtered_test_df, pd.DataFrame([closest_row_test])], ignore_index=True)
-            
-            
-            if 'coverage_diff' in filtered_val_df.columns:
-                filtered_val_df = filtered_val_df.drop('coverage_diff', axis=1)
-            if 'coverage_diff' in filtered_test_df.columns:
-                filtered_test_df = filtered_test_df.drop('coverage_diff', axis=1)
-                
-            print(f"Filtered to {len(filtered_val_df)} rows with target coverages: {target_coverages}")
-            
-            return filtered_val_df, filtered_test_df, result_object
-            
-        except Exception as e:
-            print(
-                f"Error while filtering: {e}. Config: step={step_size}, noise={noisy_std}, use_agg={use_agg}, select_one={select_only_one_std}, use_centering={use_energy_centering}"
-            )
-            raise e
+        return val_df, test_df, result_object
 
     except Exception as e:
-        
-        raise e
+        print(f"[ERROR] perform_selective_inference_experiments failed: {e}")
         return None, None, None
 
 
