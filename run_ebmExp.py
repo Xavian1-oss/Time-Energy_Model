@@ -173,10 +173,14 @@ def get_dataset_specific_configs(data_path):
         config["data"] = "custom"
         config["enc_in"] = 321
         config["dec_in"] = 321
+        # Use a smaller batch size for high-dimensional electricity dataset
+        config["batch_size"] = 2
     elif data_path.startswith("traffic"):
         config["data"] = "custom"
         config["enc_in"] = 862
         config["dec_in"] = 862
+        # Use an even smaller batch size for high-dimensional traffic dataset
+        config["batch_size"] = 1
     elif data_path.startswith("weather"):
         config["data"] = "custom"
         config["enc_in"] = 21

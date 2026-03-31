@@ -75,6 +75,7 @@ def data_provider(
         batch_size = args.batch_size
         freq = args.freq
 
+    # 小时级 ETT 数据集支持 override_scaler
     if args.data in ["ETTh1", "ETTh2"]:
         data_set = Data(
             root_path=args.root_path,
@@ -86,6 +87,18 @@ def data_provider(
             timeenc=timeenc,
             freq=freq,
             override_scaler=override_scaler,
+        )
+    # 分钟级 ETT 数据集的 Dataset_ETT_minute 暂不支持 override_scaler，因此不传该参数
+    elif args.data in ["ETTm1", "ETTm2"]:
+        data_set = Data(
+            root_path=args.root_path,
+            data_path=data_path,
+            flag=flag,
+            size=[args.seq_len, args.label_len, args.pred_len],
+            features=args.features,
+            target=args.target,
+            timeenc=timeenc,
+            freq=freq,
         )
     elif args.data in ["custom"]:
         data_set = Data(
