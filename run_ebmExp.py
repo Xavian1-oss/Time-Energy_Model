@@ -348,8 +348,10 @@ elif not hasattr(args, 'enc_in') or not hasattr(args, 'dec_in'):
 # that only TEM/EBM runs even on M tasks.
 graph_mode = getattr(args, "graph_mode", "auto")
 if graph_mode == "none":
+    # 强制关闭自适应图，无论默认值如何
     args.use_adaptive_graph = False
-elif not hasattr(args, "use_adaptive_graph"):
+else:
+    # 对 auto 模式，显式根据特征类型覆盖默认值：M 任务开启图头，其它关闭。
     args.use_adaptive_graph = (args.features == "M")
 
 
@@ -752,6 +754,34 @@ if args.is_training:
 
         after_analysis = DateUtils.now()
         print(f"Analysis completed in {after_analysis - before_analysis}")
+
+        # If the user provided an explicit output parent path (e.g., when
+        # using batch scripts like run_tem_graph_joint_M.sh), drop a small
+        # summary file there that points to the canonical checkpoint and
+        # analysis locations. This avoids creating completely empty
+        # per-run directories while keeping the main outputs under the
+        # checkpoints tree.
+        out_parent = getattr(args, "output_parent_path", None)
+        if out_parent not in (None, "", "None"):
+            try:
+                out_dir = Path(str(out_parent))
+                out_dir.mkdir(parents=True, exist_ok=True)
+
+                ckpt_dir = Path(full_ebm_path).parent
+                analysis_dir = ckpt_dir / f"local_pics_{args.data}"
+                summary_path = out_dir / "run_summary.txt"
+
+                with open(summary_path, "w") as f:
+                    f.write(f"setting: {setting}\n")
+                    f.write(f"full_ebm_path: {full_ebm_path}\n")
+                    f.write(f"checkpoint_dir: {ckpt_dir}\n")
+                    f.write(f"analysis_dir: {analysis_dir}\n")
+
+                print(f"Wrote run summary to {summary_path}")
+            except Exception as e:
+                print(
+                    f"[WARN] Failed to write summary under output_parent_path={out_parent}: {e}"
+                )
         
         if test_metrics_df is not None:
             print("\n" + "="*80)

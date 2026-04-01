@@ -21,6 +21,19 @@ def plot_mse_curves(csv_path: str, output_dir: str = "plots_ebm_graph_fusion") -
     datasets = sorted(df["dataset"].unique())
     methods = ["ebm_only", "graph_only", "fusion"]
 
+    # 使用不同的线型和 marker，让三种方法在图上更容易区分；
+    # 即便数值完全重合，至少可以从图例和样式上看出它们都存在。
+    line_styles = {
+        "ebm_only": "-",
+        "graph_only": "--",
+        "fusion": "-.",
+    }
+    markers = {
+        "ebm_only": "o",
+        "graph_only": "s",
+        "fusion": "^",
+    }
+
     for dataset in datasets:
         sub = df[df["dataset"] == dataset].copy()
         if sub.empty:
@@ -39,7 +52,24 @@ def plot_mse_curves(csv_path: str, output_dir: str = "plots_ebm_graph_fusion") -
 
             x = msub["target_coverage"].values
             y = msub["split_mse_selected"].values
-            plt.plot(x, y, marker="o", label=method)
+
+            # 对 fusion，在图例中附带 alpha 信息，便于识别即便曲线与
+            # 其他方法完全重合。
+            label = method
+            if method == "fusion" and "fusion_alpha" in msub.columns:
+                try:
+                    alpha_val = float(msub["fusion_alpha"].iloc[0])
+                    label = f"fusion (alpha={alpha_val:.2f})"
+                except Exception:
+                    label = "fusion"
+
+            plt.plot(
+                x,
+                y,
+                marker=markers.get(method, "o"),
+                linestyle=line_styles.get(method, "-"),
+                label=label,
+            )
 
         # 画一条基线（不做选择的平均 MSE）
         plt.axhline(y=baseline, color="gray", linestyle="--", label="orig_MSE")

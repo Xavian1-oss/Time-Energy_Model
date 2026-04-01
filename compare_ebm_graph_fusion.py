@@ -11,7 +11,53 @@ from utils.graph_energy_gate import compute_structure_energy
 
 
 COVERAGES = [0.1, 0.3, 0.5, 0.7, 0.9]
-FUSION_ALPHA = 0.5  # weight for EBM energy in the fused score
+
+
+def _select_best_fusion_alpha(
+    e_ebm_val_z: np.ndarray,
+    e_graph_val_z: np.ndarray,
+    mse_sel_val: np.ndarray,
+    mse_orig_val: np.ndarray,
+    candidate_alphas = (0.0, 0.25, 0.5, 0.75, 1.0),
+) -> float:
+    """Select fusion weight alpha on the validation split.
+
+    For each candidate alpha, build fused validation energies
+    e_fused_val = alpha * e_ebm_val_z + (1 - alpha) * e_graph_val_z,
+    run the standard selective-inference procedure (only on val), and
+    use the average selected MSE across COVERAGES as the objective.
+
+    Returns the alpha that minimizes this objective.
+    """
+
+    best_alpha = candidate_alphas[0]
+    best_score = float("inf")
+
+    # We only care about validation performance here. To reuse the
+    # existing helper, we pass the same fused energies and MSEs as
+    # both "val" and "test" inputs; downstream, thresholds are still
+    # determined purely from the val energies.
+    for alpha in candidate_alphas:
+        e_fused_val = alpha * e_ebm_val_z + (1.0 - alpha) * e_graph_val_z
+        val_df, _ = _compute_method_metrics(
+            method="fusion_tmp",
+            energies_val=e_fused_val,
+            energies_test=e_fused_val,
+            mse_sel_val=mse_sel_val,
+            mse_orig_val=mse_orig_val,
+            mse_sel_test=mse_sel_val,
+            mse_orig_test=mse_orig_val,
+        )
+
+        if val_df.empty:
+            continue
+
+        score = float(val_df["split_mse_selected"].mean())
+        if score < best_score:
+            best_score = score
+            best_alpha = alpha
+
+    return float(best_alpha)
 
 
 def _load_args(args_path: Path) -> SimpleNamespace:
@@ -314,8 +360,16 @@ def process_single_run(run_dir: Path) -> Tuple[pd.DataFrame, pd.DataFrame]:
     e_ebm_test_z = (e_ebm_test - e_ebm_val.mean()) / (e_ebm_val.std() + 1e-8)
     e_graph_test_z = (e_graph_test - e_graph_val.mean()) / (e_graph_val.std() + 1e-8)
 
-    e_fused_val = FUSION_ALPHA * e_ebm_val_z + (1.0 - FUSION_ALPHA) * e_graph_val_z
-    e_fused_test = FUSION_ALPHA * e_ebm_test_z + (1.0 - FUSION_ALPHA) * e_graph_test_z
+    # Select per-run fusion weight on validation split.
+    best_alpha = _select_best_fusion_alpha(
+        e_ebm_val_z=e_ebm_val_z,
+        e_graph_val_z=e_graph_val_z,
+        mse_sel_val=mse_sel_val,
+        mse_orig_val=mse_orig_val,
+    )
+
+    e_fused_val = best_alpha * e_ebm_val_z + (1.0 - best_alpha) * e_graph_val_z
+    e_fused_test = best_alpha * e_ebm_test_z + (1.0 - best_alpha) * e_graph_test_z
 
     # Compute metrics for each method.
     val_graph, test_graph = _compute_method_metrics(
@@ -337,6 +391,10 @@ def process_single_run(run_dir: Path) -> Tuple[pd.DataFrame, pd.DataFrame]:
         mse_sel_test=mse_sel_test,
         mse_orig_test=mse_orig_test,
     )
+
+    # Record the chosen fusion alpha for analysis.
+    val_fused["fusion_alpha"] = best_alpha
+    test_fused["fusion_alpha"] = best_alpha
 
     # Annotate with experiment metadata.
     # 对于 ETT 系列，args.data 本身就是 ETTh1/ETTm1 等；
