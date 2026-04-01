@@ -5,10 +5,12 @@ import random
 import torch
 
 import analysis
+from utils.graph_energy_gate import run_graph_gate_evaluation
 from data_provider.experiment_data import ExperimentData
 from exp.exp_main_energy import Exp_Main_Energy
 from run_commons import TorchDeviceUtils, ExperimentConstants
 from utilz import *
+from pathlib import Path
 
 
 def get_default_args():
@@ -21,6 +23,10 @@ def get_default_args():
         "is_training": 1,
         "model_id": "v2_ETTh1_PatchTST_seq_len_96",
         "name": "neoebm_experiment",
+        # By default we do not attach an adaptive graph head; this
+        # will be enabled automatically for multivariate (M) tasks
+        # after parsing CLI args.
+        "use_adaptive_graph": False,
         
         "data": "custom",  
         "site_id": "None",
@@ -276,6 +282,20 @@ def create_simplified_parser():
         choices=[0, 1],
         help="Enable test mode (1) or full mode (0). Test mode runs with fewer iterations for faster testing."
     )
+
+    # Optional control over graph usage. "auto" (default) keeps the
+    # current behaviour: on multivariate (M) tasks we train an
+    # adaptive graph head and run graph-based selective inference.
+    # "none" disables both adaptive graph training and graph-gate
+    # evaluation so that only TEM/EBM selective inference is run.
+    parser.add_argument(
+        "--graph_mode",
+        type=str,
+        required=False,
+        default="auto",
+        choices=["auto", "none"],
+        help="Graph usage: auto (default) or none (TEM-only on M tasks).",
+    )
     
     return parser
 
@@ -319,6 +339,18 @@ elif not hasattr(args, 'enc_in') or not hasattr(args, 'dec_in'):
     if args.data in ["ETTh1", "ETTh2", "ETTm1", "ETTm2"] and args.features in ["M", "MS"]:
         args.enc_in = 7
         args.dec_in = 7
+
+
+# Decide whether to enable adaptive graph training. By default
+# (graph_mode == "auto"), we enable it for multivariate (M) tasks so
+# that the learnable dependency graph head is trained jointly with the
+# backbone. When graph_mode == "none", we explicitly disable it so
+# that only TEM/EBM runs even on M tasks.
+graph_mode = getattr(args, "graph_mode", "auto")
+if graph_mode == "none":
+    args.use_adaptive_graph = False
+elif not hasattr(args, "use_adaptive_graph"):
+    args.use_adaptive_graph = (args.features == "M")
 
 
 
@@ -624,6 +656,64 @@ if args.is_training:
             full_ebm, full_ebm_path = exp.train_energy(
                 setting, experiment_data=experiment_data
             )
+
+            # If an adaptive dependency graph was trained, persist the
+            # learned adjacency so that offline graph/EBM fusion can
+            # reuse exactly the same structure matrix A.
+            if (
+                args.features == "M"
+                and getattr(args, "graph_mode", "auto") != "none"
+                and hasattr(exp.model, "dep_graph_builder")
+            ):
+                try:
+                    A = exp.model.dep_graph_builder()
+                    if hasattr(A, "detach"):
+                        A_np = A.detach().cpu().numpy()
+                    else:
+                        A_np = np.asarray(A)
+
+                    graph_save_dir = Path(full_ebm_path).parent
+                    graph_save_path = graph_save_dir / "learned_graph_A.npy"
+                    np.save(graph_save_path, A_np)
+                    print(
+                        f"[GraphEnergy] Saved learned adjacency matrix to {graph_save_path}"
+                    )
+                except Exception as e:
+                    print(
+                        f"[GraphEnergy][WARN] Failed to save learned adjacency matrix, continuing without it: {e}"
+                    )
+
+            # For multivariate forecasting tasks (features == "M"), run
+            # graph-structural selective inference in addition to the
+            # existing TEM noise-based analysis. This produces
+            # graph_val_metrics_filtered.csv and
+            # graph_test_metrics_filtered.csv alongside the TEM metrics.
+            # When graph_mode == "none", we skip this step so that
+            # only TEM/EBM selective inference is performed.
+            if args.features == "M" and getattr(args, "graph_mode", "auto") != "none":
+                try:
+                    from pathlib import Path
+
+                    full_ebm_path_obj = Path(full_ebm_path)
+                    parent_dir = full_ebm_path_obj.parent
+                    parent_path_pics_graph = os.path.join(
+                        parent_dir,
+                        f"local_pics_{args.data}",
+                    )
+                    FileUtils.create_dir(parent_path_pics_graph)
+
+                    print(
+                        "[GraphEnergyGate] Running graph-based selective inference for multivariate task..."
+                    )
+                    run_graph_gate_evaluation(
+                        exp=exp,
+                        experiment_data=experiment_data,
+                        parent_path_pics=parent_path_pics_graph,
+                    )
+                except Exception as e:
+                    print(
+                        f"[GraphEnergyGate][WARN] Graph-based evaluation failed and will be skipped: {e}"
+                    )
         else:
             full_ebm_path = exp.get_full_ebm_path(setting)
             if not Path(full_ebm_path).exists():
@@ -686,8 +776,8 @@ if args.is_training:
             for i, row in test_metrics_df.iterrows():
                 target_coverage = target_coverages[i] if i < len(target_coverages) else None
                 empirical_coverage = row['train_coverage']
-                mse_selected = row['val_mse_selected_model']
-                mse_orig = row['val_mse_orig_model']
+                mse_selected = row['split_mse_selected']
+                mse_orig = row['split_mse_orig']
                 error_reduction = (1 - (mse_selected / mse_orig)) * 100 if mse_orig != 0 else 0
                 
                 print(f"{target_coverage:<15.2f} {empirical_coverage:<20.4f} {mse_selected:<20.4f} {mse_orig:<20.4f} {error_reduction:<20.2f}")

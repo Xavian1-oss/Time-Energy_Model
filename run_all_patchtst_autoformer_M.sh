@@ -19,10 +19,10 @@ DATA_PATHS=(
   # "ETTm1.csv"
   # "ETTm2.csv"
   # "exchange_rate.csv"
-  "electricity.csv"
-  "traffic.csv"
+  # "electricity.csv"
   "weather.csv"
   "national_illness.csv"
+  "traffic.csv"
 )
 
 OUT_ROOT="./all_runs_PatchTST_Autoformer_M"

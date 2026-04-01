@@ -362,8 +362,8 @@ def generate_select_result_obj(
     select_result_obj = {
         "selected_error_bound": selected_error_bound,
         
-        "val_mse_selected_model": val_mse_of_selected_model,
-        "val_mse_orig_model": val_mse_of_orig_model,
+        "split_mse_selected": val_mse_of_selected_model,
+        "split_mse_orig": val_mse_of_orig_model,
         "delta_val_mse_model": val_mse_of_orig_model - val_mse_of_selected_model,
         "val_mse_of_filtered_model": val_mse_of_filtered_model,
         "val_std_of_selected_model": val_std_of_selected_model,
@@ -777,7 +777,7 @@ def perform_selective_inference_experiments(
     - 直接按能量从低到高排序样本，对一组目标 coverage 取前 k% 样本，
             在这些样本上计算 MSE，得到 coverage→MSE 曲线。
 
-    返回的 DataFrame 仍然包含 train_coverage、val_mse_selected_model、val_mse_orig_model
+    返回的 DataFrame 仍然包含 train_coverage、split_mse_selected、split_mse_orig
     等列，以兼容后续写 CSV 和打印 summary 的逻辑。
     """
 
@@ -828,8 +828,8 @@ def perform_selective_inference_experiments(
                     # 为兼容后续打印逻辑，这里字段名仍使用 train_coverage，
                     # 但实际含义已经是 "验证集上的 empirical coverage"。
                     "train_coverage": val_coverage,
-                    "val_mse_selected_model": mse_selected,
-                    "val_mse_orig_model": mse_orig_all,
+                    "split_mse_selected": mse_selected,
+                    "split_mse_orig": mse_orig_all,
                     "split": split_name,
                 }
                 rows.append(row)
