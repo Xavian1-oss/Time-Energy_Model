@@ -318,17 +318,34 @@ class Exp_Main_Energy(Exp_Basic):
                             and hasattr(self.model, "dep_graph_builder")
                             and self.model.dep_graph_builder is not None
                         ):
+                            # 使用预测误差作为样本权重，让图正则在高误差样本上
+                            # 起到更强约束作用（error-aware regularization）。
+                            with torch.no_grad():
+                                per_sample_mse = (
+                                    (outputs - batch_y) ** 2
+                                ).mean(dim=(1, 2))  # [B]
+                                mse_mean = per_sample_mse.mean() + 1e-6
+                                sample_weights = (per_sample_mse / mse_mean).clamp(
+                                    min=0.1, max=10.0
+                                )  # [B]
+
                             batch_y_target = batch_y.detach()  # [B, H, D]
                             D = batch_y_target.size(-1)
 
-                            # Learned adjacency A 
+                            # Learned adjacency A
                             A = self.model.dep_graph_builder()  # [D, D]
 
                             # Pairwise squared differences over horizon
                             diff_y = batch_y_target.unsqueeze(-1) - batch_y_target.unsqueeze(-2)  # [B,H,D,D]
                             dist_y = (diff_y ** 2).sum(dim=1)  # [B,D,D]
 
-                            loss_graph = (A.unsqueeze(0) * dist_y).sum(dim=(1, 2)).mean() / float(D * D)
+                            # Graph energy per sample
+                            energy_per_sample = (
+                                (A.unsqueeze(0) * dist_y).sum(dim=(1, 2))
+                                / float(D * D)
+                            )  # [B]
+
+                            loss_graph = (sample_weights * energy_per_sample).mean()
                             graph_weight = getattr(self.args, "gate_graph_loss_weight", 0.1)
                             loss = loss + graph_weight * loss_graph
 
@@ -370,6 +387,15 @@ class Exp_Main_Energy(Exp_Basic):
                         and hasattr(self.model, "dep_graph_builder")
                         and self.model.dep_graph_builder is not None
                     ):
+                        with torch.no_grad():
+                            per_sample_mse = (
+                                (outputs - batch_y) ** 2
+                            ).mean(dim=(1, 2))  # [B]
+                            mse_mean = per_sample_mse.mean() + 1e-6
+                            sample_weights = (per_sample_mse / mse_mean).clamp(
+                                min=0.1, max=10.0
+                            )  # [B]
+
                         batch_y_target = batch_y.detach()  # [B, H, D]
                         D = batch_y_target.size(-1)
 
@@ -378,7 +404,12 @@ class Exp_Main_Energy(Exp_Basic):
                         diff_y = batch_y_target.unsqueeze(-1) - batch_y_target.unsqueeze(-2)  # [B,H,D,D]
                         dist_y = (diff_y ** 2).sum(dim=1)  # [B,D,D]
 
-                        loss_graph = (A.unsqueeze(0) * dist_y).sum(dim=(1, 2)).mean() / float(D * D)
+                        energy_per_sample = (
+                            (A.unsqueeze(0) * dist_y).sum(dim=(1, 2))
+                            / float(D * D)
+                        )  # [B]
+
+                        loss_graph = (sample_weights * energy_per_sample).mean()
                         graph_weight = getattr(self.args, "gate_graph_loss_weight", 0.1)
                         loss = loss + graph_weight * loss_graph
 

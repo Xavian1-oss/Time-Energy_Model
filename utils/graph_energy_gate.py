@@ -50,10 +50,27 @@ class AdaptiveEmbeddingGraphBuilder(nn.Module):
         self.embed_dim = embed_dim
         self.node_emb = nn.Parameter(torch.randn(num_nodes, embed_dim))
 
+        # For high-dimensional graphs, a fully dense learned adjacency
+        # can be noisy且难以泛化。这里内置一个简单的 top-k 稀疏策略：
+        # - 当通道数较大时，仅保留每行前 top_k 个最大的关联；
+        # - 对于低维数据（D 很小），则保持全连接以避免过度剪枝。
+        # 这个值目前是经验默认值，如有需要可以在构建时改为可配置。 
+        self.top_k = 10 if num_nodes > 10 else None
+
     def forward(self) -> Tensor:
         # [D, D] unnormalized affinities
         A = torch.matmul(self.node_emb, self.node_emb.t())
         A = F.relu(A)
+
+        D = A.size(0)
+        top_k = self.top_k
+        if top_k is not None and 0 < top_k < D:
+            # 对每一行仅保留 top_k 个最大的值，其余置零，形成稀疏图。
+            values, indices = torch.topk(A, k=top_k, dim=1)
+            mask = torch.zeros_like(A, dtype=torch.bool)
+            mask.scatter_(1, indices, True)
+            A = torch.where(mask, A, torch.zeros_like(A))
+
         # Row-normalize so each row sums to 1
         A = F.softmax(A, dim=1)
         return A
@@ -62,6 +79,8 @@ class AdaptiveEmbeddingGraphBuilder(nn.Module):
 def build_correlation_adjacency_from_loader(
     data_loader: Iterable,
     device: torch.device,
+    top_k: Optional[int] = None,
+    add_self_loops: bool = True,
 ) -> Tensor:
     """Build a correlation-based adjacency matrix from a data loader.
 
@@ -69,9 +88,17 @@ def build_correlation_adjacency_from_loader(
     compute a Spearman-like correlation across channels. The resulting
     matrix is converted to a non-negative, row-normalized adjacency.
 
+    To make the graph more robust (especially in high dimensions), we
+    optionally sparsify each row to keep only the top_k strongest
+    correlations and/or add self-loops before row normalization.
+
     Args:
         data_loader: Iterable yielding (batch_x, batch_y, batch_x_mark, batch_y_mark).
         device: Torch device for the returned tensor.
+        top_k: If provided and smaller than the number of channels D,
+            each row keeps only its top_k largest affinities.
+        add_self_loops: Whether to add identity connections before
+            normalizing rows.
 
     Returns:
         A: [D, D] row-normalized adjacency tensor.
@@ -113,9 +140,24 @@ def build_correlation_adjacency_from_loader(
     std_outer = torch.clamp(std_outer, min=1e-8)
     corr = cov / std_outer
 
-    # Use absolute correlation as affinity and row-normalize.
+    # Use absolute correlation as affinity.
     A_raw = torch.abs(corr)
     A_raw = torch.nan_to_num(A_raw, nan=0.0)
+
+    D = A_raw.size(0)
+
+    # Optional sparsification: keep only top_k neighbors per row.
+    if top_k is not None and 0 < top_k < D:
+        # For each row, zero out all but the top_k largest entries.
+        values, indices = torch.topk(A_raw, k=top_k, dim=1)
+        mask = torch.zeros_like(A_raw, dtype=torch.bool)
+        mask.scatter_(1, indices, True)
+        A_raw = torch.where(mask, A_raw, torch.zeros_like(A_raw))
+
+    # Optional self-loops before normalization.
+    if add_self_loops:
+        A_raw = A_raw + torch.eye(D, device=A_raw.device, dtype=A_raw.dtype)
+
     row_sums = A_raw.sum(dim=1, keepdim=True)
     row_sums = torch.clamp(row_sums, min=1e-8)
     A = A_raw / row_sums
@@ -155,6 +197,13 @@ def compute_structure_energy(y_hat: Tensor, A: Tensor) -> Tensor:
 
 @dataclass
 class GateConfig:
+    """Configuration returned by calibration.
+
+    The gate currently operates in a purely graph-structural mode, so
+    mu_feat/std_feat/lambda_ are retained only for backward
+    compatibility and are fixed to dummy values.
+    """
+
     mu_feat: float
     std_feat: float
     mu_struct: float
@@ -178,11 +227,8 @@ def calibrate_gate(
         GateConfig with statistics and threshold.
     """
     device = exp.device
-    all_E_feat = []
     all_E_struct = []
     all_errors = []  # per-sample forecasting errors for selective risk
-
-    gate_lambda = lambda_
 
     with torch.no_grad():
         for batch in calib_loader:
@@ -192,89 +238,40 @@ def calibrate_gate(
             batch_x_mark = batch_x_mark.float().to(device)
             batch_y_mark = batch_y_mark.float().to(device)
 
-            E_feat, E_struct, diagnostics = gate._compute_energies(
+            E_struct, diagnostics = gate._compute_energies(
                 exp,
                 (batch_x, batch_y, batch_x_mark, batch_y_mark),
             )
-            all_E_feat.append(E_feat.detach().cpu())
             all_E_struct.append(E_struct.detach().cpu())
             # Optional: per-sample MSE for each validation sample
             per_sample_mse = diagnostics.get("per_sample_mse", None)
             if per_sample_mse is not None:
                 all_errors.append(per_sample_mse.detach().cpu())
 
-    if not all_E_feat:
+    if not all_E_struct:
         raise RuntimeError("Calibration loader is empty; cannot calibrate gate.")
 
-    E_feat_all = torch.cat(all_E_feat, dim=0).float()
     E_struct_all = torch.cat(all_E_struct, dim=0).float()
     errors_all = torch.cat(all_errors, dim=0).float() if all_errors else None
 
-    norm_feat = Normalizer()
     norm_struct = Normalizer()
-    norm_feat.fit(E_feat_all)
     norm_struct.fit(E_struct_all)
-
-    E_feat_z_all = norm_feat.transform(E_feat_all)
     E_struct_z_all = norm_struct.transform(E_struct_all)
 
-    # ------------------------------------------------------------------
-    # Automatically select lambda by minimizing accepted-only risk on
-    # the validation set under the target coverage.
-    #
-    # 当前实现采用 graph-only 模式：
-    #   - GraphEnergyGate 内部不再维护单独的 feature 头，
-    #     特征不确定性统一由 TEM/EBM 流水线负责；
-    #   - 这里固定使用结构能量 E_struct_z 来做 gating，等价于
-    #     lambda = 0，使得 E_joint = E_struct_z。
-    # 如需在将来融合外部提供的 feature 能量，可以在此处扩展
-    # 为在 [0,1] 上搜索不同的 lambda。
-    # ------------------------------------------------------------------
+    # 在当前实现中，门控完全基于结构能量 E_struct_z，
+    # 不再混入任何 feature 头能量；因此 joint 能量就是
+    # E_struct_z 本身。
+    E_joint = E_struct_z_all
+    E_joint_np = E_joint.numpy()
+    tau = float(np.quantile(E_joint_np, coverage))
+    accept_mask = E_joint <= tau
+    achieved_coverage = float(accept_mask.float().mean().item())
 
-    lambda_candidates = torch.tensor([0.0])
-    best_lambda = gate_lambda
-    best_tau = None
-    best_achieved = None
-    best_risk = float("inf")
-
-    for lam in lambda_candidates:
-        lam_val = float(lam.item())
-        E_joint = lam * E_feat_z_all + (1.0 - lam) * E_struct_z_all
-        E_joint_np = E_joint.numpy()
-        tau_lam = float(np.quantile(E_joint_np, coverage))
-        accept_mask = E_joint <= tau_lam
-        if accept_mask.sum() == 0:
-            continue
-
-        if errors_all is not None:
-            risk = errors_all[accept_mask].mean().item()
-        else:
-            # Fallback: use joint energy as a proxy for risk
-            risk = E_joint[accept_mask].mean().item()
-
-        if risk < best_risk:
-            best_risk = risk
-            best_lambda = lam_val
-            best_tau = tau_lam
-            best_achieved = float(accept_mask.float().mean().item())
-
-    # If for some reason no candidate updated best_tau, fall back to
-    # the provided gate_lambda without automatic tuning.
-    if best_tau is None:
-        E_joint_all = gate_lambda * E_feat_z_all + (1.0 - gate_lambda) * E_struct_z_all
-        E_joint_np = E_joint_all.numpy()
-        tau = float(np.quantile(E_joint_np, coverage))
-        accept_mask = E_joint_all <= tau
-        achieved_coverage = float(accept_mask.float().mean().item())
-        selected_lambda = gate_lambda
-    else:
-        tau = best_tau
-        achieved_coverage = best_achieved if best_achieved is not None else coverage
-        selected_lambda = best_lambda
+    selected_lambda = 0.0
 
     return GateConfig(
-        mu_feat=float(norm_feat.mean),
-        std_feat=float(norm_feat.std),
+        mu_feat=0.0,
+        std_feat=1.0,
         mu_struct=float(norm_struct.mean),
         std_struct=float(norm_struct.std),
         tau=tau,
@@ -297,23 +294,17 @@ class GraphEnergyGate:
         lambda_: float = 0.6,
         coverage: float = 0.9,
     ):
+        # 当前实现为纯 graph-only 门控，lambda_ 仅作为
+        # 兼容字段保留，不参与计算。
         self.lambda_ = lambda_
         self.coverage = coverage
 
         # 依赖图构建器：可以是自适应的（例如 AdaptiveEmbeddingGraphBuilder），
         # 也可以是一个返回固定邻接矩阵的 lambda。
         self.dep_graph_builder = dep_graph_builder
-        # 不再维护内部 feature 头，保留占位方便未来扩展。
-        self.feat_energy_model = None
 
         self.config: Optional[GateConfig] = None
-        self.norm_feat = Normalizer()
         self.norm_struct = Normalizer()
-
-        # Aggregated Energy Inference hyperparameters for feature head
-        # Always enabled for now; can be turned off by setting agg_samples=0.
-        self.agg_samples: int = 32
-        self.agg_noise_std: float = 0.1
 
     @property
     def is_calibrated(self) -> bool:
@@ -346,27 +337,15 @@ class GraphEnergyGate:
         target_indices = self._get_target_channel_indices(exp, batch_x, D)
         return y_hat, target_indices
 
-    def _feature_energy_aggregated(self, batch_x: Tensor, y_hat: Tensor) -> Tensor:
-        """Feature energy stub.
-
-        当前集成中，特征不确定性完全由 TEM 噪声/EBM 管线负责，
-        GraphEnergyGate 只使用结构能量做 gating。这里返回全零，
-        使得在校准与推理阶段 E_joint 退化为 E_struct_z。
-        """
-        return torch.zeros(y_hat.size(0), device=y_hat.device, dtype=y_hat.dtype)
-
     def _compute_energies(
         self,
         exp: Any,
         batch: Tuple[Tensor, Tensor, Tensor, Tensor],
-    ) -> Tuple[Tensor, Tensor, Dict[str, Tensor]]:
+    ) -> Tuple[Tensor, Dict[str, Tensor]]:
         batch_x, batch_y, batch_x_mark, batch_y_mark = batch
 
         # Base forecast
         y_hat, target_indices = self._base_forecast(exp, batch)
-
-        # Feature energy (aggregated energy inference)
-        E_feat = self._feature_energy_aggregated(batch_x, y_hat)
 
         # Per-sample forecasting error (MSE over horizon and channels)
         f_dim = -1 if getattr(exp.args, "features", "M") == "MS" else 0
@@ -383,11 +362,10 @@ class GraphEnergyGate:
         E_struct = compute_structure_energy(y_hat, A)
 
         diagnostics = {
-            "E_feat": E_feat,
             "E_struct": E_struct,
             "per_sample_mse": per_sample_mse,
         }
-        return E_feat, E_struct, diagnostics
+        return E_struct, diagnostics
 
     def fit_calibration(
         self,
@@ -414,8 +392,6 @@ class GraphEnergyGate:
         self.coverage = config.coverage
 
         # Update internal normalizers
-        self.norm_feat.mean = config.mu_feat
-        self.norm_feat.std = config.std_feat
         self.norm_struct.mean = config.mu_struct
         self.norm_struct.std = config.std_struct
 
@@ -433,21 +409,19 @@ class GraphEnergyGate:
         if not self.is_calibrated:
             raise RuntimeError("GraphEnergyGate must be calibrated before calling forward_gate().")
 
-        E_feat, E_struct, diagnostics = self._compute_energies(exp, batch)
+        E_struct, diagnostics = self._compute_energies(exp, batch)
 
         # Normalize using calibration stats
-        E_feat_z = self.norm_feat.transform(E_feat)
         E_struct_z = self.norm_struct.transform(E_struct)
 
-        lambda_ = self.lambda_
-        E_joint = lambda_ * E_feat_z + (1.0 - lambda_) * E_struct_z
+        # Graph-only joint energy.
+        E_joint = E_struct_z
 
         tau = self.config.tau if self.config is not None else 0.0
         reject_mask = E_joint > tau
 
         diagnostics = {
             **diagnostics,
-            "E_feat_z": E_feat_z,
             "E_struct_z": E_struct_z,
             "E_joint": E_joint,
             "reject_mask": reject_mask,
@@ -528,7 +502,14 @@ def run_graph_gate_evaluation(
         dep_graph_builder = def_dep_builder
     else:
         print("[GraphEnergyGate] Building correlation-based adjacency from train loader...")
-        A = build_correlation_adjacency_from_loader(experiment_data.train_loader, device)
+        # 使用稀疏相关图：每个节点仅保留若干最强相关的邻居，并加入自环，
+        # 在高维数据集上通常比完全密集的相关矩阵更稳健。
+        A = build_correlation_adjacency_from_loader(
+            experiment_data.train_loader,
+            device,
+            top_k=10,
+            add_self_loops=True,
+        )
         dep_graph_builder = lambda: A
 
     gate = GraphEnergyGate(
