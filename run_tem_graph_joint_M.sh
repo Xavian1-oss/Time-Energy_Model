@@ -31,14 +31,14 @@ MODELS=("PatchTST")
 # Data paths (CSV filenames under ./dataset)
 DATA_PATHS=(
   # "ETTh1.csv"
-  "ETTh2.csv"
-  "ETTm1.csv"
+  # "ETTh2.csv"
+  # "ETTm1.csv"
   "ETTm2.csv"
-  # "exchange_rate.csv"
+  "exchange_rate.csv"
+  "national_illness.csv"
+  "weather.csv"
   # "electricity.csv"
   # "traffic.csv"
-  # "weather.csv"
-  # "national_illness.csv"
 )
 
 OUT_ROOT="./all_runs_tem_graph_joint_M"
