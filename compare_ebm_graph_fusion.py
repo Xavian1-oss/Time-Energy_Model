@@ -223,6 +223,38 @@ def _build_correlation_adjacency_from_array(arr: np.ndarray, device: torch.devic
     return A.to(device=device, dtype=torch.float32)
 
 
+def _compute_graph_energies_chunked(
+    y_hat_np: np.ndarray,
+    A: torch.Tensor,
+    device: torch.device,
+    max_batch_size: int,
+) -> np.ndarray:
+    """Compute graph-structural energies in small batches to limit memory usage.
+
+    y_hat_np has shape [N, H, D], A is [D, D]. We iterate over the
+    first dimension in chunks so that compute_structure_energy never
+    sees a huge batch at once (which would create a massive
+    [B, H, D, D] tensor internally and risk OOM).
+    """
+
+    N = y_hat_np.shape[0]
+    energies: List[np.ndarray] = []
+
+    with torch.no_grad():
+        for start in range(0, N, max_batch_size):
+            end = min(start + max_batch_size, N)
+            if start >= end:
+                break
+            chunk = torch.from_numpy(y_hat_np[start:end]).to(device)
+            e_chunk = compute_structure_energy(chunk, A)
+            energies.append(e_chunk.cpu().numpy())
+
+    if not energies:
+        return np.zeros((0,), dtype=np.float32)
+
+    return np.concatenate(energies, axis=0)
+
+
 def process_single_run(run_dir: Path) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """Process one experiment run directory under checkpoints.
 
@@ -271,6 +303,15 @@ def process_single_run(run_dir: Path) -> Tuple[pd.DataFrame, pd.DataFrame]:
     use_adaptive_graph = bool(getattr(args, "use_adaptive_graph", False))
     use_graph_for_analysis = (graph_mode != "none") and use_adaptive_graph
 
+    # Determine a human-readable dataset name once so it can be reused
+    # for both ETT-style and custom datasets.
+    raw_dataset = getattr(args, "data", "unknown")
+    data_path_val = getattr(args, "data_path", None)
+    if raw_dataset == "custom" and data_path_val is not None:
+        dataset_name = Path(str(data_path_val)).stem
+    else:
+        dataset_name = raw_dataset
+
     # EBM-only metrics (always available).
     val_ebm, test_ebm = _compute_method_metrics(
         method="ebm_only",
@@ -287,12 +328,8 @@ def process_single_run(run_dir: Path) -> Tuple[pd.DataFrame, pd.DataFrame]:
     # curves. This keeps graph-based analysis restricted to runs that
     # actually used a learned graph during training.
     if not use_graph_for_analysis:
-        raw_dataset = getattr(args, "data", "unknown")
-        data_path_val = getattr(args, "data_path", None)
-        if raw_dataset == "custom" and data_path_val is not None:
-            dataset = Path(str(data_path_val)).stem
-        else:
-            dataset = raw_dataset
+        # Reuse the dataset_name logic above for consistency.
+        dataset = dataset_name
 
         experiment = run_dir.name
         for df in (val_ebm, test_ebm):
@@ -336,27 +373,29 @@ def process_single_run(run_dir: Path) -> Tuple[pd.DataFrame, pd.DataFrame]:
     # If no valid learned adjacency is available, build a
     # correlation-based adjacency directly from validation forecasts.
     if A is None:
-        # For very high-dimensional outputs (e.g., electricity/traffic with
-        # hundreds of channels), constructing and using a full correlation
-        # adjacency can be prohibitively expensive in this analysis script.
-        # To keep the comparison lightweight, we skip runs whose output
-        # dimension exceeds a threshold.
-        max_dim_for_graph = 128
-        if D > max_dim_for_graph:
-            raise RuntimeError(
-                f"Output dimension D={D} exceeds max_dim_for_graph={max_dim_for_graph}; "
-                f"skipping graph-based comparison for this run to avoid OOM."
-            )
-
         A = _build_correlation_adjacency_from_array(y_hat_val, device)
 
-    with torch.no_grad():
-        y_hat_val_t = torch.from_numpy(y_hat_val).to(device)
-        y_hat_test_t = torch.from_numpy(y_hat_test).to(device)
-        e_graph_val_t = compute_structure_energy(y_hat_val_t, A)
-        e_graph_test_t = compute_structure_energy(y_hat_test_t, A)
-        e_graph_val = e_graph_val_t.cpu().numpy()
-        e_graph_test = e_graph_test_t.cpu().numpy()
+    # Compute graph energies in small batches to avoid building a huge
+    # [B, H, D, D] tensor at once (which is especially problematic for
+    # high-dimensional datasets like electricity/traffic).
+    if D > 128:
+        # Very high-dimensional outputs: use tiny batches for safety.
+        max_batch_size = 1
+    else:
+        max_batch_size = 64
+
+    e_graph_val = _compute_graph_energies_chunked(
+        y_hat_np=y_hat_val,
+        A=A,
+        device=device,
+        max_batch_size=max_batch_size,
+    )
+    e_graph_test = _compute_graph_energies_chunked(
+        y_hat_np=y_hat_test,
+        A=A,
+        device=device,
+        max_batch_size=max_batch_size,
+    )
 
     # Fusion energies: z-score on validation set, shared for test.
     e_ebm_val_z = (e_ebm_val - e_ebm_val.mean()) / (e_ebm_val.std() + 1e-8)
@@ -405,12 +444,8 @@ def process_single_run(run_dir: Path) -> Tuple[pd.DataFrame, pd.DataFrame]:
     # 对于 ETT 系列，args.data 本身就是 ETTh1/ETTm1 等；
     # 对于自定义数据（args.data == "custom"），用 data_path 的文件名
     # （去掉扩展名）来区分 electricity / exchange_rate / weather 等。
-    raw_dataset = getattr(args, "data", "unknown")
-    data_path_val = getattr(args, "data_path", None)
-    if raw_dataset == "custom" and data_path_val is not None:
-        dataset = Path(str(data_path_val)).stem
-    else:
-        dataset = raw_dataset
+    # Reuse the dataset_name logic above for consistency.
+    dataset = dataset_name
 
     experiment = run_dir.name
     for df in (val_ebm, test_ebm, val_graph, test_graph, val_fused, test_fused):
