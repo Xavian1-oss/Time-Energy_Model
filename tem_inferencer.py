@@ -63,12 +63,14 @@ class TEMInferencer:
             
 
         y_hat = opt_model.y_hat.detach()
+        # Ensure energy_hat is always at least 1D (shape [batch_size])
+        # to avoid zero-dimensional numpy arrays when batch_size == 1.
         energy_hat = (
             opt_model(batch_x, batch_x_mark, dec_inp, batch_y_mark, enc_out)
-            .squeeze()
             .detach()
             .cpu()
             .numpy()
+            .reshape(-1)
         )
 
         set_grad_flow_for_nn(passed_ebm, True)
