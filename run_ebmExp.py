@@ -629,13 +629,26 @@ if args.is_training:
         
         exp = Exp(args, setting=setting)  
 
-        if not args.only_rerun_inference:
+        # Decide whether we can reuse existing checkpoints (backbone + EBM)
+        # instead of retraining from scratch. This is enabled when both the
+        # forecasting checkpoint and full_ebm.pth exist and no force_retrain
+        # flags are set.
+        full_ebm_path = exp.get_full_ebm_path(setting)
+        model_ckpt_path = exp._model_checkpoint_path(setting)
+        can_reuse_checkpoints = (
+            Path(full_ebm_path).exists()
+            and Path(model_ckpt_path).exists()
+            and not getattr(args, "force_retrain_orig_model", False)
+            and not getattr(args, "force_retrain_y_enc", False)
+            and not getattr(args, "force_retrain_xy_dec", False)
+        )
+
+        if not args.only_rerun_inference and not can_reuse_checkpoints:
             print(
                 ">>>>>>>start training : {}>>>>>>>>>>>>>>>>>>>>>>>>>>".format(setting)
             )
             before_exp_train = DateUtils.now()
 
-            
             experiment_data = ExperimentData.from_args(args)
 
             exp.train(setting, experiment_data=experiment_data)
@@ -716,6 +729,156 @@ if args.is_training:
                     print(
                         f"[GraphEnergyGate][WARN] Graph-based evaluation failed and will be skipped: {e}"
                     )
+        elif not args.only_rerun_inference and can_reuse_checkpoints:
+            # Warm-start path: reuse existing trained backbone + EBM without
+            # retraining. We only need to load the forecasting checkpoint so
+            # that online graph-gate evaluation can use the learned
+            # dependency graph; TEM/EBM analysis will read full_ebm.pth
+            # directly from disk.
+            print(
+                f"[WarmStart] Found existing checkpoints for setting='{setting}'. "
+                f"Reusing trained backbone and EBM without retraining."
+            )
+
+            device = torch.device("cuda" if args.use_gpu else "cpu")
+            try:
+                exp.model.load_state_dict(
+                    torch.load(model_ckpt_path, map_location=device)
+                )
+            except Exception as e:
+                print(
+                    f"[WarmStart][WARN] Failed to load backbone checkpoint from {model_ckpt_path}: {e}. "
+                    f"Falling back to full training."
+                )
+                # Fall back to the original training branch
+                print(
+                    ">>>>>>>start training : {}>>>>>>>>>>>>>>>>>>>>>>>>>>".format(setting)
+                )
+                before_exp_train = DateUtils.now()
+
+                experiment_data = ExperimentData.from_args(args)
+
+                exp.train(setting, experiment_data=experiment_data)
+                after_exp_train = DateUtils.now()
+                print(f"Training completed in {after_exp_train - before_exp_train}")
+
+                print(
+                    ">>>>>>>testing : {}<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<".format(setting)
+                )
+                exp.test(setting, experiment_data=experiment_data)
+
+                if args.do_predict:
+                    print(
+                        ">>>>>>>predicting : {}<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<".format(
+                            setting
+                        )
+                    )
+                    exp.predict(setting, True)
+
+                full_ebm, full_ebm_path = exp.train_energy(
+                    setting, experiment_data=experiment_data
+                )
+
+                if (
+                    args.features == "M"
+                    and getattr(args, "graph_mode", "auto") != "none"
+                    and hasattr(exp.model, "dep_graph_builder")
+                ):
+                    try:
+                        A = exp.model.dep_graph_builder()
+                        if hasattr(A, "detach"):
+                            A_np = A.detach().cpu().numpy()
+                        else:
+                            A_np = np.asarray(A)
+
+                        graph_save_dir = Path(full_ebm_path).parent
+                        graph_save_path = graph_save_dir / "learned_graph_A.npy"
+                        np.save(graph_save_path, A_np)
+                        print(
+                            f"[GraphEnergy] Saved learned adjacency matrix to {graph_save_path}"
+                        )
+                    except Exception as e2:
+                        print(
+                            f"[GraphEnergy][WARN] Failed to save learned adjacency matrix, continuing without it: {e2}"
+                        )
+
+                if args.features == "M" and getattr(args, "graph_mode", "auto") != "none":
+                    try:
+                        from pathlib import Path
+
+                        full_ebm_path_obj = Path(full_ebm_path)
+                        parent_dir = full_ebm_path_obj.parent
+                        parent_path_pics_graph = os.path.join(
+                            parent_dir,
+                            f"local_pics_{args.data}",
+                        )
+                        FileUtils.create_dir(parent_path_pics_graph)
+
+                        print(
+                            "[GraphEnergyGate] Running graph-based selective inference for multivariate task..."
+                        )
+                        run_graph_gate_evaluation(
+                            exp=exp,
+                            experiment_data=experiment_data,
+                            parent_path_pics=parent_path_pics_graph,
+                        )
+                    except Exception as e2:
+                        print(
+                            f"[GraphEnergyGate][WARN] Graph-based evaluation failed and will be skipped: {e2}"
+                        )
+            else:
+                # Successfully loaded backbone; optionally refresh adjacency
+                # file if it is missing.
+                if (
+                    args.features == "M"
+                    and getattr(args, "graph_mode", "auto") != "none"
+                    and hasattr(exp.model, "dep_graph_builder")
+                ):
+                    graph_save_dir = Path(full_ebm_path).parent
+                    graph_save_path = graph_save_dir / "learned_graph_A.npy"
+                    if not graph_save_path.exists():
+                        try:
+                            A = exp.model.dep_graph_builder()
+                            if hasattr(A, "detach"):
+                                A_np = A.detach().cpu().numpy()
+                            else:
+                                A_np = np.asarray(A)
+                            np.save(graph_save_path, A_np)
+                            print(
+                                f"[GraphEnergy] Saved learned adjacency matrix to {graph_save_path} (warm start)"
+                            )
+                        except Exception as e:
+                            print(
+                                f"[GraphEnergy][WARN] Failed to save learned adjacency matrix on warm start: {e}"
+                            )
+
+                # We still run graph-gate evaluation so that the current
+                # run has fresh selective metrics if desired.
+                experiment_data = ExperimentData.from_args(args)
+                if args.features == "M" and getattr(args, "graph_mode", "auto") != "none":
+                    try:
+                        from pathlib import Path
+
+                        full_ebm_path_obj = Path(full_ebm_path)
+                        parent_dir = full_ebm_path_obj.parent
+                        parent_path_pics_graph = os.path.join(
+                            parent_dir,
+                            f"local_pics_{args.data}",
+                        )
+                        FileUtils.create_dir(parent_path_pics_graph)
+
+                        print(
+                            "[GraphEnergyGate] Running graph-based selective inference for multivariate task (warm start)..."
+                        )
+                        run_graph_gate_evaluation(
+                            exp=exp,
+                            experiment_data=experiment_data,
+                            parent_path_pics=parent_path_pics_graph,
+                        )
+                    except Exception as e:
+                        print(
+                            f"[GraphEnergyGate][WARN] Graph-based evaluation failed on warm start and will be skipped: {e}"
+                        )
         else:
             full_ebm_path = exp.get_full_ebm_path(setting)
             if not Path(full_ebm_path).exists():
