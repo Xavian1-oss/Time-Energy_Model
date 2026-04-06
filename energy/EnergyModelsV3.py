@@ -142,17 +142,57 @@ class AutoformerNeoEBM(AbstractTimeseriesEBMV2):
         )
 
     def _forward_y_enc(self, batch_y):
+        """Encode target sequence y via the multisample MLP encoder.
+
+        MultisampleMLPDecoder expects input of shape
+        [batch, input_dim_local, num_samples], where input_dim_local was
+        configured as dec_out_2_dim (typically label_len + pred_len) and
+        num_samples corresponds to the number of target channels.
+
+        Its forward flattens the (batch, num_samples) dimensions, so the
+        raw output has shape [batch * num_samples, seq_len * d_model]. We
+        need to recover [batch, seq_len, d_model] by first reshaping back
+        to [batch, num_samples, seq_len, d_model] and then aggregating
+        over the num_samples dimension (e.g., simple average). This keeps
+        the interface consistent with enc_out from the backbone, which is
+        [batch, seq_len, d_model].
+        """
+
+        # Use only the prediction window, shifted to the end of the
+        # original sequence length with zeros in the prefix to match the
+        # backbone's time axis.
         actual_y = batch_y[:, -self.orig_model_pred_len :, :]
-        
         reshaped_batch_y = torch.cat(
             [torch.zeros_like(batch_y[:, : -self.orig_model_pred_len, :]), actual_y],
             dim=1,
         )
+
+        # Input to MultisampleMLPDecoder: [B, input_dim_local, num_samples]
+        B, input_dim_local, num_samples = reshaped_batch_y.shape
         encoded_y = self.y_encoder(reshaped_batch_y)
-        reshaped_encoded_y = encoded_y.reshape(
-            reshaped_batch_y.shape[0], self.orig_model_seq_len, self.orig_model_d_model
+
+        # MultisampleMLPDecoder flattens (batch, num_samples) into the
+        # batch dimension and produces vectors of length
+        # orig_model_seq_len * orig_model_d_model.
+        expected_output_dim = self.orig_model_seq_len * self.orig_model_d_model
+        if encoded_y.numel() != B * num_samples * expected_output_dim:
+            raise RuntimeError(
+                f"Unexpected encoded_y numel={encoded_y.numel()} for B={B}, "
+                f"num_samples={num_samples}, expected_output_dim={expected_output_dim}"
+            )
+
+        encoded_y = encoded_y.view(
+            B,
+            num_samples,
+            self.orig_model_seq_len,
+            self.orig_model_d_model,
         )
-        
+
+        # Aggregate over samples/channels. For single-output models this is
+        # a no-op; for multi-output (M tasks) this averages contributions
+        # from all target channels.
+        reshaped_encoded_y = encoded_y.mean(dim=1)
+
         return reshaped_encoded_y
 
     def get_decoded(self, xs: torch.Tensor, ys: torch.Tensor):
