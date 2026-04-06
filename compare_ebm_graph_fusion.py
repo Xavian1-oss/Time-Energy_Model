@@ -238,6 +238,10 @@ def process_single_run(run_dir: Path) -> Tuple[pd.DataFrame, pd.DataFrame]:
 
     args = _load_args(args_path)
 
+    # Backbone model name (Autoformer, PatchTST, etc.) so that downstream
+    # metrics and plots can be grouped per backbone.
+    model_name = getattr(args, "model", "unknown")
+
     # Only consider multivariate (M) tasks as requested.
     if getattr(args, "features", None) != "M":
         raise RuntimeError(f"Run {run_dir} is not multivariate (features == 'M'); skipping.")
@@ -294,6 +298,7 @@ def process_single_run(run_dir: Path) -> Tuple[pd.DataFrame, pd.DataFrame]:
         for df in (val_ebm, test_ebm):
             df["experiment"] = experiment
             df["dataset"] = dataset
+            df["model"] = model_name
 
         return val_ebm, test_ebm
 
@@ -411,6 +416,7 @@ def process_single_run(run_dir: Path) -> Tuple[pd.DataFrame, pd.DataFrame]:
     for df in (val_ebm, test_ebm, val_graph, test_graph, val_fused, test_fused):
         df["experiment"] = experiment
         df["dataset"] = dataset
+        df["model"] = model_name
 
     val_all = pd.concat([val_ebm, val_graph, val_fused], ignore_index=True)
     test_all = pd.concat([test_ebm, test_graph, test_fused], ignore_index=True)
@@ -451,6 +457,7 @@ def main():
     val_all = pd.concat(all_val, ignore_index=True)
     test_all = pd.concat(all_test, ignore_index=True)
 
+    # Global aggregated CSVs (backward-compatible).
     out_val = Path("ebm_graph_fusion_val_metrics.csv")
     out_test = Path("ebm_graph_fusion_test_metrics.csv")
     val_all.to_csv(out_val, index=False)
@@ -458,6 +465,25 @@ def main():
 
     print(f"Saved aggregated validation metrics to {out_val}")
     print(f"Saved aggregated test metrics to {out_test}")
+
+    # Additionally, store metrics grouped by backbone under
+    # ebm_graph_fusion_metrics/<model>/... so that different
+    # backbones' curves/results are cleanly separated.
+    metrics_root = Path("ebm_graph_fusion_metrics")
+    metrics_root.mkdir(parents=True, exist_ok=True)
+
+    for split_name, df_split in ("val", val_all), ("test", test_all):
+        if "model" not in df_split.columns:
+            continue
+        for model_name in sorted(df_split["model"].dropna().unique()):
+            sub = df_split[df_split["model"] == model_name]
+            if sub.empty:
+                continue
+            model_dir = metrics_root / str(model_name)
+            model_dir.mkdir(parents=True, exist_ok=True)
+            out_path = model_dir / f"ebm_graph_fusion_{split_name}_metrics.csv"
+            sub.to_csv(out_path, index=False)
+            print(f"Saved {split_name} metrics for model={model_name} to {out_path}")
 
     # Quick text summary on test split.
     print("\n=== Test split summary (by dataset, method, coverage) ===")
