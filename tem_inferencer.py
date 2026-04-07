@@ -324,9 +324,15 @@ class TEMInferencer:
                 .to(device)
             )
 
+            # Per-sample MSE of the original forecasting model,
+            # averaged over all non-batch dimensions so that the
+            # result is always a 1D array of shape [B]. This avoids
+            # mixing 1D and 2D arrays when concatenating across
+            # batches for multivariate datasets like electricity.
+            diff_orig = torch.square(outputs_orig - batch_y_orig)
+            reduce_dims = list(range(1, diff_orig.dim()))
             mse_orig_calculated_by_torch = (
-                torch.mean(torch.square(outputs_orig - batch_y_orig), axis=1)
-                .squeeze()
+                torch.mean(diff_orig, dim=reduce_dims)
                 .detach()
                 .cpu()
                 .numpy()
@@ -573,9 +579,13 @@ class TEMInferencer:
             list_of_energy_hat_orig_model.append(energy_hat_init_orig_no_optim)
 
             list_of_batch_y.append(target_batch_y.detach().cpu().numpy())
+            # Match mse_orig_calculated_by_torch: per-sample MSE over
+            # all non-batch dimensions, yielding shape [B] for every
+            # batch so that concatenation is well-defined.
+            diff_orig = torch.square(outputs_orig - batch_y_orig)
+            reduce_dims = list(range(1, diff_orig.dim()))
             list_of_mse_orig.append(
-                torch.mean(torch.square(outputs_orig - batch_y_orig), dim=1)
-                .squeeze()
+                torch.mean(diff_orig, dim=reduce_dims)
                 .detach()
                 .cpu()
                 .numpy()
