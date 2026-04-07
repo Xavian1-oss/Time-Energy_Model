@@ -310,12 +310,13 @@ class TEMInferencer:
                 .float()
                 .to(device)
             )
-
-            y_hat_orig = model.autoformer(
-                batch_x, batch_x_mark, dec_inp_orig, batch_y_mark
-            )
-            outputs_orig = y_hat_orig[:, -args.pred_len :, f_dim:]
-            batch_y_orig = target_batch_y[:, -args.pred_len :, f_dim:].to(device)
+            # evaluation gracefully instead of raising a concatenation
+            # error on empty lists downstream.
+            if len(data_loader) == 0:
+                print(
+                    f"[WARN] Data loader '{data_loader_name}' is empty – skipping adhoc energy evaluation."
+                )
+                return {}, data
 
             dec_inp = torch.zeros_like(target_batch_y[:, -args.pred_len :, :]).float()
             dec_inp = (

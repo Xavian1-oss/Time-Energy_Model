@@ -58,9 +58,19 @@ def data_provider(
     else:
         data_path = args.data_path
 
-    if flag == "test":
-        shuffle_flag = False
+    # Configure loader behaviour per split. For evaluation (val/test), we
+    # avoid dropping the last incomplete batch so that small validation
+    # splits (e.g., national_illness with M features) still yield at
+    # least one batch, preventing empty loaders downstream in
+    # TEMInferencer.test_adhoc_energy.
+    if flag == "train":
+        shuffle_flag = True
         drop_last = True
+        batch_size = args.batch_size
+        freq = args.freq
+    elif flag in ["val", "test"]:
+        shuffle_flag = False
+        drop_last = False
         batch_size = args.batch_size
         freq = args.freq
     elif flag == "pred":
@@ -70,8 +80,9 @@ def data_provider(
         freq = args.freq
         Data = Dataset_Pred
     else:
-        shuffle_flag = True
-        drop_last = True
+        # Fallback: treat like evaluation split
+        shuffle_flag = False
+        drop_last = False
         batch_size = args.batch_size
         freq = args.freq
 
