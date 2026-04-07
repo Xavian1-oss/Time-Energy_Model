@@ -489,7 +489,7 @@ def run_graph_gate_evaluation(
     downstream tooling (e.g., summarization scripts) can consume them.
     """
     if coverages is None:
-        coverages = [0.1, 0.3, 0.5, 0.7, 0.9]
+        coverages = [0.5, 0.6, 0.7, 0.8, 0.9]
 
     device = exp.device
 

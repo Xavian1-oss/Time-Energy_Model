@@ -964,7 +964,7 @@ if args.is_training:
             print("-" * 100)
             
             
-            target_coverages = [0.1, 0.3, 0.5, 0.7, 0.9]
+            target_coverages = [0.5, 0.6, 0.7, 0.8, 0.9]
             
             for i, row in test_metrics_df.iterrows():
                 target_coverage = target_coverages[i] if i < len(target_coverages) else None

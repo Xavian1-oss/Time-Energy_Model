@@ -796,7 +796,7 @@ def perform_selective_inference_experiments(
         val_order = np.argsort(val_energy)
         sorted_val_energy = val_energy[val_order]
 
-        target_coverages = [0.1, 0.3, 0.5, 0.7, 0.9]
+        target_coverages = [0.5, 0.6, 0.7, 0.8, 0.9]
 
         def build_metrics_for_split(split_name, split_energy, split_mse_sel, split_mse_orig):
             rows = []
@@ -1216,7 +1216,7 @@ def perform_selective_inference_experiments_with_optim(
 
         
         
-        target_coverages = [0.1, 0.3, 0.5, 0.7, 0.9]  
+        target_coverages = [0.5, 0.6, 0.7, 0.8, 0.9]  
         
         
         filtered_val_df = pd.DataFrame()

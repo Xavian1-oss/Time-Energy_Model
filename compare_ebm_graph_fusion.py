@@ -10,7 +10,7 @@ import torch
 from utils.graph_energy_gate import compute_structure_energy
 
 
-COVERAGES = [0.1, 0.3, 0.5, 0.7, 0.9]
+COVERAGES = [0.5, 0.6, 0.7, 0.8, 0.9]
 
 
 def _select_best_fusion_alpha(
