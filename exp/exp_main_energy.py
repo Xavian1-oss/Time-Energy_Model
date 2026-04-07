@@ -596,13 +596,15 @@ class Exp_Main_Energy(Exp_Basic):
 
         if self.args.test_flop:
             exit()
-        preds = np.array(preds)
-        trues = np.array(trues)
-        inputx = np.array(inputx)
 
-        preds = preds.reshape(-1, preds.shape[-2], preds.shape[-1])
-        trues = trues.reshape(-1, trues.shape[-2], trues.shape[-1])
-        inputx = inputx.reshape(-1, inputx.shape[-2], inputx.shape[-1])
+        # Batches from the test loader can have different sizes when
+        # drop_last=False (e.g., final batch smaller than batch_size),
+        # so we concatenate along the batch dimension instead of
+        # relying on np.array + reshape, which assumes homogeneous
+        # batch shapes.
+        preds = np.concatenate(preds, axis=0)
+        trues = np.concatenate(trues, axis=0)
+        inputx = np.concatenate(inputx, axis=0)
 
         from utils.metrics import metric
 
