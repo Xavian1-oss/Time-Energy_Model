@@ -462,13 +462,20 @@ class TEMInferencer:
                             DateUtils.now() - start_optim_generation
                         )
                         y_ebm_optim = y_ebm_optim[:, -args.pred_len :, :]
-                        mse_ebm_optim = torch.mean(
-                            torch.square(y_ebm_optim - batch_y_orig), dim=1
-                        ).squeeze(dim=1)
-                        
-                        mae_y_hat_ebm_optim = (
-                            torch.abs(y_ebm_optim - batch_y_orig)
-                        ).squeeze(dim=1)
+                        # Per-sample MSE and MAE for the optimized
+                        # forecast, averaged over all non-batch
+                        # dimensions so that each batch contributes a
+                        # 1D vector of shape [B]. This keeps all
+                        # entries in ebm_optim_*_dict homogeneous for
+                        # later np.concatenate.
+                        diff_optim = torch.square(y_ebm_optim - batch_y_orig)
+                        reduce_dims = list(range(1, diff_optim.dim()))
+                        mse_ebm_optim = torch.mean(diff_optim, dim=reduce_dims)
+
+                        abs_diff_optim = torch.abs(y_ebm_optim - batch_y_orig)
+                        mae_y_hat_ebm_optim = torch.mean(
+                            abs_diff_optim, dim=reduce_dims
+                        )
                         
                         key = f"s{steps}_e{int(np.abs(np.log10(([optim_lr]))))}"
 
@@ -480,14 +487,10 @@ class TEMInferencer:
 
                         ebm_optim_energy_dict[key].append(energy_ebm_optim)
                         ebm_optim_mae_y_hat_dict[key].append(
-                            torch.mean(mae_y_hat_ebm_optim, dim=1)
-                            .squeeze()
-                            .detach()
-                            .cpu()
-                            .numpy()
+                            mae_y_hat_ebm_optim.detach().cpu().numpy()
                         )
                         ebm_optim_mse_dict[key].append(
-                            mse_ebm_optim.squeeze().detach().cpu().numpy()
+                            mse_ebm_optim.detach().cpu().numpy()
                         )
                         ebm_optim_duration_dict[key].append(optim_generation_duration)
 
