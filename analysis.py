@@ -9,184 +9,163 @@ from utilz import *
 GLOBAL_LOG_DEFAULT = False
 EPSILON = 0.000001
 
+
 def calculate_aggregate_df(
     aggregate_df_data_df: pd.DataFrame,
     selected_error_bound: float,
     selection_criteria: str = "original",
-    EPSILON = 0.000001
-
-
-    def calculate_aggregate_df(
-        aggregate_df_data_df: pd.DataFrame,
-        selected_error_bound: float,
-        selection_criteria: str = "original",
-        log_time=GLOBAL_LOG_DEFAULT,
-    ):
-        """Backward-compatible aggregate selection.
-
-        原始实现基于噪声能量分箱进行复杂的区间选择。当前简化版保留
-        相同的接口，但默认返回输入的 aggregate_df_data_df（既作为
-        selected_aggregate_df_data_df 也作为 updated_aggregate_df_data_df），
-        从而避免对 legacy 噪声路径产生语法错误，同时不影响新的
-        能量排序 selective 流程。
-        """
-
-        before = DateUtils.now()
-        _ = (selected_error_bound, selection_criteria, log_time, before)
-
-        selected_aggregate_df_data_df = aggregate_df_data_df.copy()
-        aggregate_df = aggregate_df_data_df.copy()
-        return selected_aggregate_df_data_df, aggregate_df
-
-
-    def _compute_energy_sorted_selective_metrics(
-            val_energy: np.ndarray,
-            val_mse_sel: np.ndarray,
-            val_mse_orig: np.ndarray,
-            split_name: str,
-            split_energy: np.ndarray,
-            split_mse_sel: np.ndarray,
-            split_mse_orig: np.ndarray,
-            target_coverages=None,
-    ):
-        """核心的能量排序 selective 逻辑，供内部复用。
-
-        按验证集能量 val_energy 排序，在给定的 target_coverages 下
-        决定阈值，并在指定 split 上统计 selected MSE 和 full MSE。
-
-        返回一个 DataFrame，字段为：
-            target_coverage, train_coverage, split_mse_selected,
-            split_mse_orig, split
-        """
-
-        if target_coverages is None:
-            target_coverages = [0.5, 0.6, 0.7, 0.8, 0.9]
-
-        val_energy = np.asarray(val_energy)
-        val_mse_sel = np.asarray(val_mse_sel)
-        val_mse_orig = np.asarray(val_mse_orig)
-
-        split_energy = np.asarray(split_energy)
-        split_mse_sel = np.asarray(split_mse_sel)
-        split_mse_orig = np.asarray(split_mse_orig)
-
-        val_order = np.argsort(val_energy)
-        sorted_val_energy = val_energy[val_order]
-        n_val = len(sorted_val_energy)
-
-        rows = []
-        if n_val == 0:
-            return pd.DataFrame(rows)
-
-        for target_cov in target_coverages:
-            k = max(1, int(round(target_cov * n_val)))
-            k = min(k, n_val)
-
-            energy_threshold = sorted_val_energy[k - 1]
-
-            val_mask = val_energy <= energy_threshold
-            val_coverage = float(val_mask.sum()) / float(n_val)
-
-            split_mask = split_energy <= energy_threshold
-            if split_mask.sum() == 0:
-                continue
-
-            mse_selected = float(split_mse_sel[split_mask].mean())
-            mse_orig_all = float(split_mse_orig.mean())
-
-            rows.append(
-                {
-                    "target_coverage": target_cov,
-                    # 字段名保持 train_coverage 以兼容后续逻辑，
-                    # 实际含义为 "验证集 empirical coverage"。
-                    "train_coverage": val_coverage,
-                    "split_mse_selected": mse_selected,
-                    "split_mse_orig": mse_orig_all,
-                    "split": split_name,
-                }
-            )
-
-        return pd.DataFrame(rows)
-
-
-    def perform_selective_inference_experiments(
-            result_object: dict,
-            result_object_train: dict,
-            result_object_test: dict,
-            parent_path_pics: str,
-            train_dataset_scaler,
-            is_different_project=False,
-            parallel_pool_size=None,
-            is_test_mode=False,
-            noisy_std_custom=None,
-    ):
-        """Simplified noise-based selective inference using direct energy sorting.
-
-        新版本将核心的阈值选择与指标计算委托给
-        _compute_energy_sorted_selective_metrics，以便在其它
-        模块中重用相同逻辑，同时保持对外行为不变。
-        """
-
-        try:
-            # 使用验证集上的能量来确定能量阈值和 empirical coverage
-            val_energy = np.asarray(result_object["energy_hats_init_orig_model"])
-            val_mse_sel = np.asarray(result_object["mse_init_orig_model"])
-            val_mse_orig = np.asarray(result_object["mse_orig"])
-
-            # 测试集上的能量和误差（用于最终评估）
-            test_energy = np.asarray(result_object_test["energy_hats_init_orig_model"])
-            test_mse_sel = np.asarray(result_object_test["mse_init_orig_model"])
-            test_mse_orig = np.asarray(result_object_test["mse_orig"])
-
-            target_coverages = [0.5, 0.6, 0.7, 0.8, 0.9]
-
-            # 验证集上的 coverage→MSE 曲线
-            val_df = _compute_energy_sorted_selective_metrics(
-                val_energy=val_energy,
-                val_mse_sel=val_mse_sel,
-                val_mse_orig=val_mse_orig,
-                split_name="val",
-                split_energy=val_energy,
-                split_mse_sel=val_mse_sel,
-                split_mse_orig=val_mse_orig,
-                target_coverages=target_coverages,
-            )
-
-            # 测试集上的表现（阈值仍由验证集决定）
-            test_df = _compute_energy_sorted_selective_metrics(
-                val_energy=val_energy,
-                val_mse_sel=val_mse_sel,
-                val_mse_orig=val_mse_orig,
-                split_name="test",
-                split_energy=test_energy,
-                split_mse_sel=test_mse_sel,
-                split_mse_orig=test_mse_orig,
-                target_coverages=target_coverages,
-            )
-
-            print(
-                f"[INFO] Simple energy-sorting selective inference produced "
-                f"{len(val_df)} val rows and {len(test_df)} test rows for coverages {target_coverages}"
-            )
-
-            return val_df, test_df, result_object
-
-        except Exception as e:
-            print(f"[ERROR] perform_selective_inference_experiments failed: {e}")
-            return None, None, None
     log_time=GLOBAL_LOG_DEFAULT,
 ):
+    """Backward-compatible aggregate selection stub.
+
+    当前主流程已不再依赖基于噪声分箱的复杂逻辑。此处保留同样的
+    接口以避免旧代码报错，直接返回输入的 aggregate_df_data_df
+    作为 selected 与 updated 结果。
     """
-    TODO: This method is not used in the current implementation. Need to see if it is robust against weird errors
-    """
+
+    _ = (selected_error_bound, selection_criteria, log_time)
+    selected_aggregate_df_data_df = aggregate_df_data_df.copy()
+    aggregate_df = aggregate_df_data_df.copy()
+    return selected_aggregate_df_data_df, aggregate_df
+
+
+def _compute_energy_sorted_selective_metrics(
+    val_energy: np.ndarray,
+    val_mse_sel: np.ndarray,
+    val_mse_orig: np.ndarray,
+    split_name: str,
+    split_energy: np.ndarray,
+    split_mse_sel: np.ndarray,
+    split_mse_orig: np.ndarray,
+    target_coverages=None,
+):
+    """核心的能量排序 selective 逻辑，供内部复用。"""
+
+    if target_coverages is None:
+        target_coverages = [0.5, 0.6, 0.7, 0.8, 0.9]
+
+    val_energy = np.asarray(val_energy)
+    val_mse_sel = np.asarray(val_mse_sel)
+    val_mse_orig = np.asarray(val_mse_orig)
+
+    split_energy = np.asarray(split_energy)
+    split_mse_sel = np.asarray(split_mse_sel)
+    split_mse_orig = np.asarray(split_mse_orig)
+
+    val_order = np.argsort(val_energy)
+    sorted_val_energy = val_energy[val_order]
+    n_val = len(sorted_val_energy)
+
+    rows = []
+    if n_val == 0:
+        return pd.DataFrame(rows)
+
+    for target_cov in target_coverages:
+        k = max(1, int(round(target_cov * n_val)))
+        k = min(k, n_val)
+
+        energy_threshold = sorted_val_energy[k - 1]
+
+        val_mask = val_energy <= energy_threshold
+        val_coverage = float(val_mask.sum()) / float(n_val)
+
+        split_mask = split_energy <= energy_threshold
+        if split_mask.sum() == 0:
+            continue
+
+        mse_selected = float(split_mse_sel[split_mask].mean())
+        mse_orig_all = float(split_mse_orig.mean())
+
+        rows.append(
+            {
+                "target_coverage": target_cov,
+                "train_coverage": val_coverage,
+                "split_mse_selected": mse_selected,
+                "split_mse_orig": mse_orig_all,
+                "split": split_name,
+            }
+        )
+
+    return pd.DataFrame(rows)
+
+
+def perform_selective_inference_experiments(
+    result_object: dict,
+    result_object_train: dict,
+    result_object_test: dict,
+    parent_path_pics: str,
+    train_dataset_scaler,
+    is_different_project=False,
+    parallel_pool_size=None,
+    is_test_mode=False,
+    noisy_std_custom=None,
+):
+    """简化版 noise 策略 selective：直接按能量排序取分位数。"""
+
+    try:
+        # 使用验证集上的能量来确定能量阈值和 empirical coverage
+        val_energy = np.asarray(result_object["energy_hats_init_orig_model"])
+        val_mse_sel = np.asarray(result_object["mse_init_orig_model"])
+        val_mse_orig = np.asarray(result_object["mse_orig"])
+
+        # 测试集上的能量和误差（用于最终评估）
+        test_energy = np.asarray(result_object_test["energy_hats_init_orig_model"])
+        test_mse_sel = np.asarray(result_object_test["mse_init_orig_model"])
+        test_mse_orig = np.asarray(result_object_test["mse_orig"])
+
+        target_coverages = [0.5, 0.6, 0.7, 0.8, 0.9]
+
+        # 验证集上的 coverage→MSE 曲线
+        val_df = _compute_energy_sorted_selective_metrics(
+            val_energy=val_energy,
+            val_mse_sel=val_mse_sel,
+            val_mse_orig=val_mse_orig,
+            split_name="val",
+            split_energy=val_energy,
+            split_mse_sel=val_mse_sel,
+            split_mse_orig=val_mse_orig,
+            target_coverages=target_coverages,
+        )
+
+        # 测试集上的表现（阈值仍由验证集决定）
+        test_df = _compute_energy_sorted_selective_metrics(
+            val_energy=val_energy,
+            val_mse_sel=val_mse_sel,
+            val_mse_orig=val_mse_orig,
+            split_name="test",
+            split_energy=test_energy,
+            split_mse_sel=test_mse_sel,
+            split_mse_orig=test_mse_orig,
+            target_coverages=target_coverages,
+        )
+
+        print(
+            f"[INFO] Simple energy-sorting selective inference produced "
+            f"{len(val_df)} val rows and {len(test_df)} test rows for coverages {target_coverages}"
+        )
+
+        return val_df, test_df, result_object
+
+    except Exception as e:
+        print(f"[ERROR] perform_selective_inference_experiments failed: {e}")
+        return None, None, None
+
+
+def calculate_energy_bounds_optimized(
+    df_total_filtered,
+    energy_key: str,
+    mse_key: str,
+    step_size: int,
+    log_time=GLOBAL_LOG_DEFAULT,
+):
+    """Optimized binning of energy space into contiguous ranges."""
 
     before = DateUtils.now()
+    _ = (log_time, before)
 
-    
     min_noisy_energy = df_total_filtered[energy_key].min()
     max_noisy_energy = df_total_filtered[energy_key].max()
 
-    
     energy_bins = (
         np.arange(
             int(min_noisy_energy * step_size), int(max_noisy_energy * step_size) + 2, 1
@@ -194,20 +173,13 @@ def calculate_aggregate_df(
         / step_size
     )
 
-    
     energy_categories = pd.cut(df_total_filtered[energy_key], bins=energy_bins)
-
-    
     grouped = df_total_filtered.groupby(energy_categories)
     aggregate_df_data = grouped.agg({mse_key: ["mean", "std", "count"]}).reset_index()
 
-    
     aggregate_df_data.columns = ["energy_range", "mean_mse", "std", "actual_count"]
-
-    
     aggregate_df_data["energy_range_idx"] = range(len(aggregate_df_data))
 
-    
     def len_to_str(length):
         if length < 25:
             return "< 25"
@@ -225,12 +197,9 @@ def calculate_aggregate_df(
             return ">= 25000"
 
     aggregate_df_data["count"] = aggregate_df_data["actual_count"].apply(len_to_str)
-
-    
     aggregate_df_data = aggregate_df_data.sort_values("energy_range").reset_index(
         drop=True
     )
-
     aggregate_df_data = aggregate_df_data.dropna()
     return aggregate_df_data, energy_bins
 
@@ -242,13 +211,7 @@ def calculate_energy_bounds(
     step_size: int,
     log_time=GLOBAL_LOG_DEFAULT,
 ):
-    """Backward-compatible wrapper around calculate_energy_bounds_optimized.
-
-    Older code paths expect a function named `calculate_energy_bounds` that
-    returns (aggregate_df_data_df, range_of_energies). We now implement this
-    in terms of the optimized binning logic while preserving the return
-    structure (the second value is the array of energy bin edges).
-    """
+    """Wrapper around calculate_energy_bounds_optimized for legacy callers."""
 
     aggregate_df_data, energy_bins = calculate_energy_bounds_optimized(
         df_total_filtered=df_total_filtered,
