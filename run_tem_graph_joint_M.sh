@@ -37,19 +37,19 @@ RUN_MODE=${RUN_MODE:-all}
 export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0}
 
 # Models to evaluate
-MODELS=("PatchTST")
+MODELS=("PatchTST" "Autoformer")
 
 # Data paths (CSV filenames under ./dataset)
 DATA_PATHS=(
-  # "ETTh1.csv"
-  # "ETTh2.csv"
-  # "ETTm1.csv"
+  "ETTh1.csv"
+  "ETTh2.csv"
+  "ETTm1.csv"
   "ETTm2.csv"
   "exchange_rate.csv"
   "national_illness.csv"
   "weather.csv"
-  # "electricity.csv"
-  # "traffic.csv"
+  "electricity.csv"
+  "traffic.csv"
 )
 
 OUT_ROOT="./all_runs_tem_graph_joint_M"
