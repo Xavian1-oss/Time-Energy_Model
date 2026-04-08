@@ -155,23 +155,6 @@ def calculate_aggregate_df(
             except Exception as e:
                 print(f"[ERROR] perform_selective_inference_experiments failed: {e}")
                 return None, None, None
-            & (df_total_filtered[energy_key] < ((i + 1) / step_size))
-        ]
-        aggregate_df_obj = {
-            "energy_range_idx": i,
-            "energy_range": i / step_size,
-            "mean_mse": subset_df[mse_key].mean(),
-            "std": subset_df[mse_key].std(),
-            "count": len_to_str(len(subset_df[mse_key])),
-            "actual_count": (len(subset_df[mse_key])),
-        }
-        list_of_aggregate_df_data.append(aggregate_df_obj)
-
-    global aggregate_df_data_df_with_na, aggregate_df_data_df, selected_aggregate_df_data_df
-    aggregate_df_data_df_with_na = pd.DataFrame(list_of_aggregate_df_data)
-    aggregate_df_data_df = aggregate_df_data_df_with_na.dropna()
-
-    return aggregate_df_data_df, range_of_energies
 
 
 def calculate_energy_bounds_optimized(
@@ -237,6 +220,31 @@ def calculate_energy_bounds_optimized(
     )
 
     aggregate_df_data = aggregate_df_data.dropna()
+    return aggregate_df_data, energy_bins
+
+
+def calculate_energy_bounds(
+    df_total_filtered,
+    energy_key: str,
+    mse_key: str,
+    step_size: int,
+    log_time=GLOBAL_LOG_DEFAULT,
+):
+    """Backward-compatible wrapper around calculate_energy_bounds_optimized.
+
+    Older code paths expect a function named `calculate_energy_bounds` that
+    returns (aggregate_df_data_df, range_of_energies). We now implement this
+    in terms of the optimized binning logic while preserving the return
+    structure (the second value is the array of energy bin edges).
+    """
+
+    aggregate_df_data, energy_bins = calculate_energy_bounds_optimized(
+        df_total_filtered=df_total_filtered,
+        energy_key=energy_key,
+        mse_key=mse_key,
+        step_size=step_size,
+        log_time=log_time,
+    )
     return aggregate_df_data, energy_bins
 
 
