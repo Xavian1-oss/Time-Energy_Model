@@ -25,10 +25,12 @@
 
 set -e
 
-# RUN_MODE 控制是否执行离线 EBM/Graph/Fusion 汇总与画图：
-#   all        : 默认，全流程（TEM + Graph + Fusion + plot）
-#   graph_only : 只跑训练和在线 Graph gate，跳过 compare_ebm_graph_fusion.py
-#                和 plot_ebm_graph_fusion_curves.py，方便快速看 Graph 头效果。
+# RUN_MODE 控制是否训练 EBM 以及是否执行离线 EBM/Graph/Fusion 汇总与画图：
+#   all        : 默认，全流程（训练 backbone+EBM+Graph 头 + TEM/EBM 分析 +
+#                Graph gate + offline compare_ebm_graph_fusion.py + 画图）
+#   graph_only : 只训练 backbone + Graph 头，并运行在线 Graph gate，完全
+#                跳过 EBM 训练和 TEM/EBM 分析；同时不自动调用离线
+#                compare_ebm_graph_fusion.py 和 plot_ebm_graph_fusion_curves.py。
 RUN_MODE=${RUN_MODE:-all}
 
 # You can override this before calling the script if needed
@@ -62,17 +64,34 @@ for model in "${MODELS[@]}"; do
     echo "==============================================="
     echo "[TRAIN] model=${model}, data_path=${data_path}, features=M"
     echo "         graph_mode=auto (train adaptive graph head + run graph gate)"
+    if [ "${RUN_MODE}" = "graph_only" ]; then
+      echo "         ebm_mode=none  (skip EBM training and TEM analysis, graph-only)"
+    fi
     echo "Outputs (checkpoints, result_objects, analysis CSVs) go under the\ncheckpoints tree; out_dir only satisfies --output_parent_path."
     echo "==============================================="
 
-    python run_ebmExp.py \
-      --model "${model}" \
-      --data_path "${data_path}" \
-      --features M \
-      --inference_strategy noise \
-      --output_parent_path "${out_dir}" \
-      --is_test_mode 0 \
-      --graph_mode auto
+    if [ "${RUN_MODE}" = "graph_only" ]; then
+      # 真正的 graph-only：不训练 EBM，不跑 TEM/EBM 分析，只训练
+      # backbone+Graph 头并运行在线 Graph gate。
+      python run_ebmExp.py \
+        --model "${model}" \
+        --data_path "${data_path}" \
+        --features M \
+        --inference_strategy noise \
+        --output_parent_path "${out_dir}" \
+        --is_test_mode 0 \
+        --graph_mode auto \
+        --ebm_mode none
+    else
+      python run_ebmExp.py \
+        --model "${model}" \
+        --data_path "${data_path}" \
+        --features M \
+        --inference_strategy noise \
+        --output_parent_path "${out_dir}" \
+        --is_test_mode 0 \
+        --graph_mode auto
+    fi
   done
 done
 

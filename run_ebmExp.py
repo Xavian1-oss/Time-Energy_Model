@@ -296,6 +296,20 @@ def create_simplified_parser():
         choices=["auto", "none"],
         help="Graph usage: auto (default) or none (TEM-only on M tasks).",
     )
+
+    # Optional control over EBM usage. "auto" (default) keeps the
+    # current behaviour: train the EBM head and run TEM-based
+    # selective inference. "none" disables both EBM training and
+    # EBM/TEM analysis so that only the forecasting backbone and
+    # (optionally) graph-based selective inference are run.
+    parser.add_argument(
+        "--ebm_mode",
+        type=str,
+        required=False,
+        default="auto",
+        choices=["auto", "none"],
+        help="EBM usage: auto (default, train + analyze EBM) or none (skip EBM, graph-only).",
+    )
     
     return parser
 
@@ -629,19 +643,29 @@ if args.is_training:
         
         exp = Exp(args, setting=setting)  
 
+        ebm_mode = getattr(args, "ebm_mode", "auto")
+
         # Decide whether we can reuse existing checkpoints (backbone + EBM)
         # instead of retraining from scratch. This is enabled when both the
         # forecasting checkpoint and full_ebm.pth exist and no force_retrain
         # flags are set.
         full_ebm_path = exp.get_full_ebm_path(setting)
         model_ckpt_path = exp._model_checkpoint_path(setting)
-        can_reuse_checkpoints = (
-            Path(full_ebm_path).exists()
-            and Path(model_ckpt_path).exists()
-            and not getattr(args, "force_retrain_orig_model", False)
-            and not getattr(args, "force_retrain_y_enc", False)
-            and not getattr(args, "force_retrain_xy_dec", False)
-        )
+        if ebm_mode == "none":
+            # In graph-only mode we never train or use the EBM, so
+            # warm-start only depends on the forecasting checkpoint.
+            can_reuse_checkpoints = (
+                Path(model_ckpt_path).exists()
+                and not getattr(args, "force_retrain_orig_model", False)
+            )
+        else:
+            can_reuse_checkpoints = (
+                Path(full_ebm_path).exists()
+                and Path(model_ckpt_path).exists()
+                and not getattr(args, "force_retrain_orig_model", False)
+                and not getattr(args, "force_retrain_y_enc", False)
+                and not getattr(args, "force_retrain_xy_dec", False)
+            )
 
         if not args.only_rerun_inference and not can_reuse_checkpoints:
             print(
@@ -668,43 +692,48 @@ if args.is_training:
                 )
                 exp.predict(setting, True)
 
-            full_ebm, full_ebm_path = exp.train_energy(
-                setting, experiment_data=experiment_data
-            )
+            if ebm_mode != "none":
+                full_ebm, full_ebm_path = exp.train_energy(
+                    setting, experiment_data=experiment_data
+                )
 
-            # If an adaptive dependency graph was trained, persist the
-            # learned adjacency so that offline graph/EBM fusion can
-            # reuse exactly the same structure matrix A.
-            if (
-                args.features == "M"
-                and getattr(args, "graph_mode", "auto") != "none"
-                and hasattr(exp.model, "dep_graph_builder")
-            ):
-                try:
-                    A = exp.model.dep_graph_builder()
-                    if hasattr(A, "detach"):
-                        A_np = A.detach().cpu().numpy()
-                    else:
-                        A_np = np.asarray(A)
+                # If an adaptive dependency graph was trained, persist the
+                # learned adjacency so that offline graph/EBM fusion can
+                # reuse exactly the same structure matrix A.
+                if (
+                    args.features == "M"
+                    and getattr(args, "graph_mode", "auto") != "none"
+                    and hasattr(exp.model, "dep_graph_builder")
+                ):
+                    try:
+                        A = exp.model.dep_graph_builder()
+                        if hasattr(A, "detach"):
+                            A_np = A.detach().cpu().numpy()
+                        else:
+                            A_np = np.asarray(A)
 
-                    graph_save_dir = Path(full_ebm_path).parent
-                    graph_save_path = graph_save_dir / "learned_graph_A.npy"
-                    np.save(graph_save_path, A_np)
-                    print(
-                        f"[GraphEnergy] Saved learned adjacency matrix to {graph_save_path}"
-                    )
-                except Exception as e:
-                    print(
-                        f"[GraphEnergy][WARN] Failed to save learned adjacency matrix, continuing without it: {e}"
-                    )
+                        graph_save_dir = Path(full_ebm_path).parent
+                        graph_save_path = graph_save_dir / "learned_graph_A.npy"
+                        np.save(graph_save_path, A_np)
+                        print(
+                            f"[GraphEnergy] Saved learned adjacency matrix to {graph_save_path}"
+                        )
+                    except Exception as e:
+                        print(
+                            f"[GraphEnergy][WARN] Failed to save learned adjacency matrix, continuing without it: {e}"
+                        )
+            else:
+                # In graph-only mode, we still define full_ebm_path so that
+                # downstream paths (e.g., for graph metrics) use the same
+                # directory structure, but we never actually train or save
+                # an EBM.
+                full_ebm_path = exp.get_full_ebm_path(setting)
 
             # For multivariate forecasting tasks (features == "M"), run
-            # graph-structural selective inference in addition to the
-            # existing TEM noise-based analysis. This produces
-            # graph_val_metrics_filtered.csv and
-            # graph_test_metrics_filtered.csv alongside the TEM metrics.
-            # When graph_mode == "none", we skip this step so that
-            # only TEM/EBM selective inference is performed.
+            # graph-structural selective inference in addition to (or, when
+            # ebm_mode == "none", instead of) TEM/EBM analysis. This
+            # produces graph_val_metrics_filtered.csv and
+            # graph_test_metrics_filtered.csv.
             if args.features == "M" and getattr(args, "graph_mode", "auto") != "none":
                 try:
                     from pathlib import Path
@@ -775,32 +804,35 @@ if args.is_training:
                     )
                     exp.predict(setting, True)
 
-                full_ebm, full_ebm_path = exp.train_energy(
-                    setting, experiment_data=experiment_data
-                )
+                if ebm_mode != "none":
+                    full_ebm, full_ebm_path = exp.train_energy(
+                        setting, experiment_data=experiment_data
+                    )
 
-                if (
-                    args.features == "M"
-                    and getattr(args, "graph_mode", "auto") != "none"
-                    and hasattr(exp.model, "dep_graph_builder")
-                ):
-                    try:
-                        A = exp.model.dep_graph_builder()
-                        if hasattr(A, "detach"):
-                            A_np = A.detach().cpu().numpy()
-                        else:
-                            A_np = np.asarray(A)
+                    if (
+                        args.features == "M"
+                        and getattr(args, "graph_mode", "auto") != "none"
+                        and hasattr(exp.model, "dep_graph_builder")
+                    ):
+                        try:
+                            A = exp.model.dep_graph_builder()
+                            if hasattr(A, "detach"):
+                                A_np = A.detach().cpu().numpy()
+                            else:
+                                A_np = np.asarray(A)
 
-                        graph_save_dir = Path(full_ebm_path).parent
-                        graph_save_path = graph_save_dir / "learned_graph_A.npy"
-                        np.save(graph_save_path, A_np)
-                        print(
-                            f"[GraphEnergy] Saved learned adjacency matrix to {graph_save_path}"
-                        )
-                    except Exception as e2:
-                        print(
-                            f"[GraphEnergy][WARN] Failed to save learned adjacency matrix, continuing without it: {e2}"
-                        )
+                            graph_save_dir = Path(full_ebm_path).parent
+                            graph_save_path = graph_save_dir / "learned_graph_A.npy"
+                            np.save(graph_save_path, A_np)
+                            print(
+                                f"[GraphEnergy] Saved learned adjacency matrix to {graph_save_path}"
+                            )
+                        except Exception as e2:
+                            print(
+                                f"[GraphEnergy][WARN] Failed to save learned adjacency matrix, continuing without it: {e2}"
+                            )
+                else:
+                    full_ebm_path = exp.get_full_ebm_path(setting)
 
                 if args.features == "M" and getattr(args, "graph_mode", "auto") != "none":
                     try:
@@ -828,9 +860,11 @@ if args.is_training:
                         )
             else:
                 # Successfully loaded backbone; optionally refresh adjacency
-                # file if it is missing.
+                # file if it is missing (when an adaptive graph head exists
+                # and ebm_mode is not 'none').
                 if (
-                    args.features == "M"
+                    ebm_mode != "none"
+                    and args.features == "M"
                     and getattr(args, "graph_mode", "auto") != "none"
                     and hasattr(exp.model, "dep_graph_builder")
                 ):
@@ -881,7 +915,7 @@ if args.is_training:
                         )
         else:
             full_ebm_path = exp.get_full_ebm_path(setting)
-            if not Path(full_ebm_path).exists():
+            if ebm_mode != "none" and not Path(full_ebm_path).exists():
                 raise ValueError(
                     f"EARLY EXIT, ebm_path='{full_ebm_path}' does not exist!"
                 )
@@ -891,6 +925,9 @@ if args.is_training:
         import os
         from pathlib import Path
 
+        # Always persist args.csv next to the (potential) EBM path so that
+        # downstream tooling can inspect the configuration, even when
+        # ebm_mode == 'none' and no full_ebm.pth is saved.
         try:
             args_df = pd.DataFrame(vars(args), index=[0])
             args_df_path = os.path.join(Path(full_ebm_path).parent, "args.csv")
@@ -901,81 +938,87 @@ if args.is_training:
         if args.only_output_model_params:
             raise ValueError("NOT IMPLEMENTED!")
 
-        before_analysis = DateUtils.now()
-        experiment_data = ExperimentData.from_args(args)
-        (
-            result_object,
-            result_object_train,
-            result_object_test,
-            train_dataset,
-            test_metrics_df,
-        ) = run_analysis(
-            experiment_data=experiment_data,
-            path_to_given_model=full_ebm_path,
-            
-        )
-
-        after_analysis = DateUtils.now()
-        print(f"Analysis completed in {after_analysis - before_analysis}")
-
-        # If the user provided an explicit output parent path (e.g., when
-        # using batch scripts like run_tem_graph_joint_M.sh), drop a small
-        # summary file there that points to the canonical checkpoint and
-        # analysis locations. This avoids creating completely empty
-        # per-run directories while keeping the main outputs under the
-        # checkpoints tree.
-        out_parent = getattr(args, "output_parent_path", None)
-        if out_parent not in (None, "", "None"):
-            try:
-                out_dir = Path(str(out_parent))
-                out_dir.mkdir(parents=True, exist_ok=True)
-
-                ckpt_dir = Path(full_ebm_path).parent
-                analysis_dir = ckpt_dir / f"local_pics_{args.data}"
-                summary_path = out_dir / "run_summary.txt"
-
-                with open(summary_path, "w") as f:
-                    f.write(f"setting: {setting}\n")
-                    f.write(f"full_ebm_path: {full_ebm_path}\n")
-                    f.write(f"checkpoint_dir: {ckpt_dir}\n")
-                    f.write(f"analysis_dir: {analysis_dir}\n")
-
-                print(f"Wrote run summary to {summary_path}")
-            except Exception as e:
-                print(
-                    f"[WARN] Failed to write summary under output_parent_path={out_parent}: {e}"
-                )
-        
-        if test_metrics_df is not None:
-            print("\n" + "="*80)
-            print(f"FINAL RESULTS SUMMARY:")
-            print("="*80)
-            print(f"Strategy: {args.test_strategy if hasattr(args, 'test_strategy') else 'noise'}")
-            if args.test_strategy == 'noise' and hasattr(args, 'noisy_std'):
-                print(f"Noise std: {args.noisy_std}")
-            elif args.test_strategy == 'optim':
-                print(f"Inference steps: {args.inference_steps if hasattr(args, 'inference_steps') else 25}")
-                print(f"Inference optim lr: {args.inference_optim_lr if hasattr(args, 'inference_optim_lr') else 0.01}")
-            
-            
-            print("\nKey metrics by coverage level:")
-            print("-" * 100)
-            print(f"{'Target Coverage':<15} {'Empirical Coverage':<20} {'Empirical Risk':<20} {'MSE Original':<20} {'Error Reduction (%)':<20}")
-            print("-" * 100)
-            
-            
-            target_coverages = [0.5, 0.6, 0.7, 0.8, 0.9]
-            
-            for i, row in test_metrics_df.iterrows():
-                target_coverage = target_coverages[i] if i < len(target_coverages) else None
-                empirical_coverage = row['train_coverage']
-                mse_selected = row['split_mse_selected']
-                mse_orig = row['split_mse_orig']
-                error_reduction = (1 - (mse_selected / mse_orig)) * 100 if mse_orig != 0 else 0
+        # When ebm_mode == 'none', we explicitly skip TEM/EBM analysis and
+        # final selective summaries; this run is intended to evaluate only
+        # the forecasting backbone and graph-based gate.
+        if ebm_mode == "none":
+            print("[EBM] ebm_mode='none': skipping EBM training and TEM analysis; graph-only metrics have been saved.")
+        else:
+            before_analysis = DateUtils.now()
+            experiment_data = ExperimentData.from_args(args)
+            (
+                result_object,
+                result_object_train,
+                result_object_test,
+                train_dataset,
+                test_metrics_df,
+            ) = run_analysis(
+                experiment_data=experiment_data,
+                path_to_given_model=full_ebm_path,
                 
-                print(f"{target_coverage:<15.2f} {empirical_coverage:<20.4f} {mse_selected:<20.4f} {mse_orig:<20.4f} {error_reduction:<20.2f}")
+            )
+
+            after_analysis = DateUtils.now()
+            print(f"Analysis completed in {after_analysis - before_analysis}")
+
+            # If the user provided an explicit output parent path (e.g., when
+            # using batch scripts like run_tem_graph_joint_M.sh), drop a small
+            # summary file there that points to the canonical checkpoint and
+            # analysis locations. This avoids creating completely empty
+            # per-run directories while keeping the main outputs under the
+            # checkpoints tree.
+            out_parent = getattr(args, "output_parent_path", None)
+            if out_parent not in (None, "", "None"):
+                try:
+                    out_dir = Path(str(out_parent))
+                    out_dir.mkdir(parents=True, exist_ok=True)
+
+                    ckpt_dir = Path(full_ebm_path).parent
+                    analysis_dir = ckpt_dir / f"local_pics_{args.data}"
+                    summary_path = out_dir / "run_summary.txt"
+
+                    with open(summary_path, "w") as f:
+                        f.write(f"setting: {setting}\n")
+                        f.write(f"full_ebm_path: {full_ebm_path}\n")
+                        f.write(f"checkpoint_dir: {ckpt_dir}\n")
+                        f.write(f"analysis_dir: {analysis_dir}\n")
+
+                    print(f"Wrote run summary to {summary_path}")
+                except Exception as e:
+                    print(
+                        f"[WARN] Failed to write summary under output_parent_path={out_parent}: {e}"
+                    )
             
-            print("="*100 + "\n")
+            if test_metrics_df is not None:
+                print("\n" + "="*80)
+                print(f"FINAL RESULTS SUMMARY:")
+                print("="*80)
+                print(f"Strategy: {args.test_strategy if hasattr(args, 'test_strategy') else 'noise'}")
+                if args.test_strategy == 'noise' and hasattr(args, 'noisy_std'):
+                    print(f"Noise std: {args.noisy_std}")
+                elif args.test_strategy == 'optim':
+                    print(f"Inference steps: {args.inference_steps if hasattr(args, 'inference_steps') else 25}")
+                    print(f"Inference optim lr: {args.inference_optim_lr if hasattr(args, 'inference_optim_lr') else 0.01}")
+                
+                
+                print("\nKey metrics by coverage level:")
+                print("-" * 100)
+                print(f"{'Target Coverage':<15} {'Empirical Coverage':<20} {'Empirical Risk':<20} {'MSE Original':<20} {'Error Reduction (%)':<20}")
+                print("-" * 100)
+                
+                
+                target_coverages = [0.5, 0.6, 0.7, 0.8, 0.9]
+                
+                for i, row in test_metrics_df.iterrows():
+                    target_coverage = target_coverages[i] if i < len(target_coverages) else None
+                    empirical_coverage = row['train_coverage']
+                    mse_selected = row['split_mse_selected']
+                    mse_orig = row['split_mse_orig']
+                    error_reduction = (1 - (mse_selected / mse_orig)) * 100 if mse_orig != 0 else 0
+                    
+                    print(f"{target_coverage:<15.2f} {empirical_coverage:<20.4f} {mse_selected:<20.4f} {mse_orig:<20.4f} {error_reduction:<20.2f}")
+                
+                print("="*100 + "\n")
 
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
