@@ -128,49 +128,36 @@ def _compute_method_metrics(
     val_mse_orig = _to_1d(mse_orig_val)
     test_mse_orig = _to_1d(mse_orig_test)
 
-    order = np.argsort(val_energy)
-    sorted_val_energy = val_energy[order]
-    n_val = len(sorted_val_energy)
+    # 复用 analysis.perform_selective_inference_experiments 中
+    # 提取出的核心逻辑，保证 TEM 与 offline fusion 指标一致。
+    from analysis import _compute_energy_sorted_selective_metrics
 
-    def build_df_for_split(
-        split_name: str,
-        split_energy: np.ndarray,
-        split_mse_sel: np.ndarray,
-        split_mse_orig: np.ndarray,
-    ) -> pd.DataFrame:
-        rows = []
-        if n_val == 0:
-            return pd.DataFrame(rows)
+    val_df = _compute_energy_sorted_selective_metrics(
+        val_energy=val_energy,
+        val_mse_sel=val_mse_sel,
+        val_mse_orig=val_mse_orig,
+        split_name="val",
+        split_energy=val_energy,
+        split_mse_sel=val_mse_sel,
+        split_mse_orig=val_mse_orig,
+        target_coverages=COVERAGES,
+    )
 
-        for target_cov in COVERAGES:
-            k = max(1, int(round(target_cov * n_val)))
-            k = min(k, n_val)
-            thresh = sorted_val_energy[k - 1]
+    test_df = _compute_energy_sorted_selective_metrics(
+        val_energy=val_energy,
+        val_mse_sel=val_mse_sel,
+        val_mse_orig=val_mse_orig,
+        split_name="test",
+        split_energy=test_energy,
+        split_mse_sel=test_mse_sel,
+        split_mse_orig=test_mse_orig,
+        target_coverages=COVERAGES,
+    )
 
-            val_mask = val_energy <= thresh
-            val_cov = float(val_mask.sum()) / float(n_val)
+    # 标记 method 字段，保持 compare_ebm_graph_fusion 的接口不变。
+    for df in (val_df, test_df):
+        df["method"] = method
 
-            split_mask = split_energy <= thresh
-            if split_mask.sum() == 0:
-                continue
-
-            mse_selected = float(split_mse_sel[split_mask].mean())
-            mse_orig_all = float(split_mse_orig.mean())
-
-            rows.append(
-                {
-                    "target_coverage": float(target_cov),
-                    "train_coverage": val_cov,
-                    "split_mse_selected": mse_selected,
-                    "split_mse_orig": mse_orig_all,
-                    "split": split_name,
-                    "method": method,
-                }
-            )
-        return pd.DataFrame(rows)
-
-    val_df = build_df_for_split("val", val_energy, val_mse_sel, val_mse_orig)
-    test_df = build_df_for_split("test", test_energy, test_mse_sel, test_mse_orig)
     return val_df, test_df
 
 
