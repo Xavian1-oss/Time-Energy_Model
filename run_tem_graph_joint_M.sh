@@ -98,8 +98,11 @@ done
   if [ "${RUN_MODE}" = "all" ]; then
     echo "==============================================="
     echo "[OFFLINE] Aggregating EBM-only / Graph-only / Fusion curves..."
+    echo "         (only runs with output under ${OUT_ROOT})"
     echo "==============================================="
-    python compare_ebm_graph_fusion.py
+    python compare_ebm_graph_fusion.py \
+      --checkpoints-root "./checkpoints" \
+      --require-output-parent-substr "${OUT_ROOT}"
 
     echo "==============================================="
     echo "[PLOT] Drawing test coverage→MSE curves per dataset..."

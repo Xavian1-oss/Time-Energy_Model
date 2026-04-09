@@ -3,6 +3,13 @@ from sklearn.preprocessing import StandardScaler
 from torch import nn
 
 
+def unwrap_dataparallel(module: nn.Module) -> nn.Module:
+    """Return the underlying module when wrapped in nn.DataParallel."""
+    if isinstance(module, nn.DataParallel):
+        return module.module
+    return module
+
+
 def set_grad_flow_for_nn(model: nn.Module, enable_grad_flow: bool):
     """
     Sets gradient flow for a given nn.Module. Allows "(un-)freezing".

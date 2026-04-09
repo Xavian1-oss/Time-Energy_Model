@@ -9,6 +9,7 @@ from utils.graph_energy_gate import run_graph_gate_evaluation
 from data_provider.experiment_data import ExperimentData
 from exp.exp_main_energy import Exp_Main_Energy
 from run_commons import TorchDeviceUtils, ExperimentConstants
+from torch_utils import unwrap_dataparallel
 from utilz import *
 from pathlib import Path
 
@@ -310,7 +311,15 @@ def create_simplified_parser():
         choices=["auto", "none"],
         help="EBM usage: auto (default, train + analyze EBM) or none (skip EBM, graph-only).",
     )
-    
+
+    parser.add_argument(
+        "--model_id",
+        type=str,
+        required=False,
+        default=None,
+        help="Override auto-derived checkpoint id (default embeds dataset + model + seq_len).",
+    )
+
     return parser
 
 
@@ -369,6 +378,22 @@ else:
     args.use_adaptive_graph = (args.features == "M")
 
 
+# Multivariate (M): output dim must match channels for backbone projections
+# (e.g. Autoformer/Informer/FEDformer use configs.c_out; PatchTST uses enc_in in the head).
+if args.features == "M" and hasattr(args, "enc_in") and args.enc_in is not None:
+    args.c_out = args.enc_in
+
+# Readable, unique checkpoint token per (dataset, model, seq_len); old default was ETTh1/PatchTST-specific.
+if user_args.model_id is not None:
+    args.model_id = user_args.model_id
+else:
+    _data_tag = (
+        Path(args.data_path).stem.replace(".", "_")
+        if getattr(args, "data", "") == "custom"
+        else str(args.data).replace(".", "_")
+    )
+    args.model_id = f"v2_{_data_tag}_{args.model}_sl{args.seq_len}"
+
 
 if args.only_rerun_inference:
     print(f">> ONLY RE-RUNNING INFERENCE!")
@@ -415,6 +440,57 @@ def verify_args(args):
         )
 
     return True
+
+
+def save_learned_graph_adjacency(
+    exp: Exp_Main_Energy,
+    full_ebm_path: str,
+    only_if_missing: bool = False,
+) -> None:
+    """Persist learned adjacency next to checkpoints (including ebm_mode='none')."""
+    run_args = exp.args
+    if run_args.features != "M" or getattr(run_args, "graph_mode", "auto") == "none":
+        return
+    backbone = unwrap_dataparallel(exp.model)
+    if not hasattr(backbone, "dep_graph_builder") or backbone.dep_graph_builder is None:
+        return
+    graph_save_path = Path(full_ebm_path).parent / "learned_graph_A.npy"
+    if only_if_missing and graph_save_path.exists():
+        return
+    try:
+        A = backbone.dep_graph_builder()
+        if hasattr(A, "detach"):
+            A_np = A.detach().cpu().numpy()
+        else:
+            A_np = np.asarray(A)
+        np.save(graph_save_path, A_np)
+        print(f"[GraphEnergy] Saved learned adjacency matrix to {graph_save_path}")
+    except Exception as e:
+        print(
+            f"[GraphEnergy][WARN] Failed to save learned adjacency matrix, continuing without it: {e}"
+        )
+
+
+def write_run_summary(run_args, setting: str, full_ebm_path: str) -> None:
+    out_parent = getattr(run_args, "output_parent_path", None)
+    if out_parent in (None, "", "None"):
+        return
+    try:
+        out_dir = Path(str(out_parent))
+        out_dir.mkdir(parents=True, exist_ok=True)
+        ckpt_dir = Path(full_ebm_path).parent
+        analysis_dir = ckpt_dir / f"local_pics_{run_args.data}"
+        summary_path = out_dir / "run_summary.txt"
+        with open(summary_path, "w") as f:
+            f.write(f"setting: {setting}\n")
+            f.write(f"full_ebm_path: {full_ebm_path}\n")
+            f.write(f"checkpoint_dir: {ckpt_dir}\n")
+            f.write(f"analysis_dir: {analysis_dir}\n")
+        print(f"Wrote run summary to {summary_path}")
+    except Exception as e:
+        print(
+            f"[WARN] Failed to write summary under output_parent_path={out_parent}: {e}"
+        )
 
 
 Exp = Exp_Main_Energy
@@ -696,38 +772,14 @@ if args.is_training:
                 full_ebm, full_ebm_path = exp.train_energy(
                     setting, experiment_data=experiment_data
                 )
-
-                # If an adaptive dependency graph was trained, persist the
-                # learned adjacency so that offline graph/EBM fusion can
-                # reuse exactly the same structure matrix A.
-                if (
-                    args.features == "M"
-                    and getattr(args, "graph_mode", "auto") != "none"
-                    and hasattr(exp.model, "dep_graph_builder")
-                ):
-                    try:
-                        A = exp.model.dep_graph_builder()
-                        if hasattr(A, "detach"):
-                            A_np = A.detach().cpu().numpy()
-                        else:
-                            A_np = np.asarray(A)
-
-                        graph_save_dir = Path(full_ebm_path).parent
-                        graph_save_path = graph_save_dir / "learned_graph_A.npy"
-                        np.save(graph_save_path, A_np)
-                        print(
-                            f"[GraphEnergy] Saved learned adjacency matrix to {graph_save_path}"
-                        )
-                    except Exception as e:
-                        print(
-                            f"[GraphEnergy][WARN] Failed to save learned adjacency matrix, continuing without it: {e}"
-                        )
             else:
                 # In graph-only mode, we still define full_ebm_path so that
                 # downstream paths (e.g., for graph metrics) use the same
                 # directory structure, but we never actually train or save
                 # an EBM.
                 full_ebm_path = exp.get_full_ebm_path(setting)
+
+            save_learned_graph_adjacency(exp, full_ebm_path, only_if_missing=False)
 
             # For multivariate forecasting tasks (features == "M"), run
             # graph-structural selective inference in addition to (or, when
@@ -808,31 +860,10 @@ if args.is_training:
                     full_ebm, full_ebm_path = exp.train_energy(
                         setting, experiment_data=experiment_data
                     )
-
-                    if (
-                        args.features == "M"
-                        and getattr(args, "graph_mode", "auto") != "none"
-                        and hasattr(exp.model, "dep_graph_builder")
-                    ):
-                        try:
-                            A = exp.model.dep_graph_builder()
-                            if hasattr(A, "detach"):
-                                A_np = A.detach().cpu().numpy()
-                            else:
-                                A_np = np.asarray(A)
-
-                            graph_save_dir = Path(full_ebm_path).parent
-                            graph_save_path = graph_save_dir / "learned_graph_A.npy"
-                            np.save(graph_save_path, A_np)
-                            print(
-                                f"[GraphEnergy] Saved learned adjacency matrix to {graph_save_path}"
-                            )
-                        except Exception as e2:
-                            print(
-                                f"[GraphEnergy][WARN] Failed to save learned adjacency matrix, continuing without it: {e2}"
-                            )
                 else:
                     full_ebm_path = exp.get_full_ebm_path(setting)
+
+                save_learned_graph_adjacency(exp, full_ebm_path, only_if_missing=False)
 
                 if args.features == "M" and getattr(args, "graph_mode", "auto") != "none":
                     try:
@@ -860,31 +891,8 @@ if args.is_training:
                         )
             else:
                 # Successfully loaded backbone; optionally refresh adjacency
-                # file if it is missing (when an adaptive graph head exists
-                # and ebm_mode is not 'none').
-                if (
-                    ebm_mode != "none"
-                    and args.features == "M"
-                    and getattr(args, "graph_mode", "auto") != "none"
-                    and hasattr(exp.model, "dep_graph_builder")
-                ):
-                    graph_save_dir = Path(full_ebm_path).parent
-                    graph_save_path = graph_save_dir / "learned_graph_A.npy"
-                    if not graph_save_path.exists():
-                        try:
-                            A = exp.model.dep_graph_builder()
-                            if hasattr(A, "detach"):
-                                A_np = A.detach().cpu().numpy()
-                            else:
-                                A_np = np.asarray(A)
-                            np.save(graph_save_path, A_np)
-                            print(
-                                f"[GraphEnergy] Saved learned adjacency matrix to {graph_save_path} (warm start)"
-                            )
-                        except Exception as e:
-                            print(
-                                f"[GraphEnergy][WARN] Failed to save learned adjacency matrix on warm start: {e}"
-                            )
+                # if missing (including graph-only / ebm_mode='none' runs).
+                save_learned_graph_adjacency(exp, full_ebm_path, only_if_missing=True)
 
                 # We still run graph-gate evaluation so that the current
                 # run has fresh selective metrics if desired.
@@ -935,6 +943,8 @@ if args.is_training:
         except Exception as e:
             print(f"Exception: {e}")
 
+        write_run_summary(args, setting, full_ebm_path)
+
         if args.only_output_model_params:
             raise ValueError("NOT IMPLEMENTED!")
 
@@ -961,34 +971,6 @@ if args.is_training:
             after_analysis = DateUtils.now()
             print(f"Analysis completed in {after_analysis - before_analysis}")
 
-            # If the user provided an explicit output parent path (e.g., when
-            # using batch scripts like run_tem_graph_joint_M.sh), drop a small
-            # summary file there that points to the canonical checkpoint and
-            # analysis locations. This avoids creating completely empty
-            # per-run directories while keeping the main outputs under the
-            # checkpoints tree.
-            out_parent = getattr(args, "output_parent_path", None)
-            if out_parent not in (None, "", "None"):
-                try:
-                    out_dir = Path(str(out_parent))
-                    out_dir.mkdir(parents=True, exist_ok=True)
-
-                    ckpt_dir = Path(full_ebm_path).parent
-                    analysis_dir = ckpt_dir / f"local_pics_{args.data}"
-                    summary_path = out_dir / "run_summary.txt"
-
-                    with open(summary_path, "w") as f:
-                        f.write(f"setting: {setting}\n")
-                        f.write(f"full_ebm_path: {full_ebm_path}\n")
-                        f.write(f"checkpoint_dir: {ckpt_dir}\n")
-                        f.write(f"analysis_dir: {analysis_dir}\n")
-
-                    print(f"Wrote run summary to {summary_path}")
-                except Exception as e:
-                    print(
-                        f"[WARN] Failed to write summary under output_parent_path={out_parent}: {e}"
-                    )
-            
             if test_metrics_df is not None:
                 print("\n" + "="*80)
                 print(f"FINAL RESULTS SUMMARY:")

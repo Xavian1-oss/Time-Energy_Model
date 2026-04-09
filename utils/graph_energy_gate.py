@@ -10,6 +10,8 @@ from torch import Tensor
 import torch.nn as nn
 import torch.nn.functional as F
 
+from torch_utils import unwrap_dataparallel
+
 
 class Normalizer:
     """Simple z-score normalizer."""
@@ -497,9 +499,10 @@ def run_graph_gate_evaluation(
     # Prefer a learned adaptive graph if available on the backbone;
     # otherwise fall back to a correlation-based adjacency built from
     # the training data.
-    if hasattr(exp.model, "dep_graph_builder") and exp.model.dep_graph_builder is not None:
+    backbone = unwrap_dataparallel(exp.model)
+    if hasattr(backbone, "dep_graph_builder") and backbone.dep_graph_builder is not None:
         print("[GraphEnergyGate] Using learned adaptive graph from model.dep_graph_builder()...")
-        def_dep_builder: Callable[[], Tensor] = lambda: exp.model.dep_graph_builder()
+        def_dep_builder: Callable[[], Tensor] = lambda: backbone.dep_graph_builder()
         dep_graph_builder = def_dep_builder
     else:
         print("[GraphEnergyGate] Building correlation-based adjacency from train loader...")

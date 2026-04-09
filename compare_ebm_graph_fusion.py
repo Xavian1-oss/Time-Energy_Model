@@ -1,7 +1,8 @@
+import argparse
 import os
 from pathlib import Path
 from types import SimpleNamespace
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -58,6 +59,25 @@ def _select_best_fusion_alpha(
             best_alpha = alpha
 
     return float(best_alpha)
+
+
+def _run_matches_output_parent_filter(
+    run_dir: Path, require_substr: Optional[str]
+) -> bool:
+    """Optionally keep only runs whose args.output_parent_path contains a tag."""
+    if not require_substr:
+        return True
+    args_path = run_dir / "args.csv"
+    if not args_path.exists():
+        return False
+    try:
+        df = pd.read_csv(args_path)
+        if df.empty:
+            return False
+        op = df.iloc[0].get("output_parent_path", "")
+        return require_substr in str(op)
+    except Exception:
+        return False
 
 
 def _load_args(args_path: Path) -> SimpleNamespace:
@@ -446,7 +466,30 @@ def process_single_run(run_dir: Path) -> Tuple[pd.DataFrame, pd.DataFrame]:
 
 
 def main():
-    checkpoints_root = Path("./checkpoints")
+    parser = argparse.ArgumentParser(
+        description=(
+            "Aggregate selective-inference metrics (EBM-only, graph-only, fusion) "
+            "from completed runs under a checkpoints tree."
+        )
+    )
+    parser.add_argument(
+        "--checkpoints-root",
+        type=str,
+        default="./checkpoints",
+        help="Root directory to scan for run folders containing args.csv and result_objects/.",
+    )
+    parser.add_argument(
+        "--require-output-parent-substr",
+        type=str,
+        default=None,
+        help=(
+            "If set (e.g. a batch output folder name), only include runs whose "
+            "saved args.output_parent_path contains this substring."
+        ),
+    )
+    cli = parser.parse_args()
+
+    checkpoints_root = Path(cli.checkpoints_root)
     all_val: List[pd.DataFrame] = []
     all_test: List[pd.DataFrame] = []
 
@@ -460,8 +503,13 @@ def main():
             if (p / "result_objects").exists() and (p / "args.csv").exists()
         ]
     )
+    filt = cli.require_output_parent_substr
+    if filt:
+        run_dirs = [p for p in run_dirs if _run_matches_output_parent_filter(p, filt)]
 
     print(f"Found {len(run_dirs)} candidate runs with result_objects and args.csv")
+    if filt:
+        print(f"(filtered by output_parent_path containing {filt!r})")
 
     for run_dir in run_dirs:
         try:

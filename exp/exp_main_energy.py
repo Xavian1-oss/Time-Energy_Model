@@ -28,7 +28,7 @@ from models import (
 )
 from models.AbstractModel import AbstractModel
 from tem_inferencer import TEMInferencer
-from torch_utils import set_grad_flow_for_nn
+from torch_utils import set_grad_flow_for_nn, unwrap_dataparallel
 from utils.tools import EarlyStopping
 from utilz import *
 
@@ -313,10 +313,11 @@ class Exp_Main_Energy(Exp_Basic):
                         # Optional Graph Structure supervision (Dirichlet
                         # energy on ground-truth sequences) when an
                         # adaptive graph builder is attached.
+                        _backbone = unwrap_dataparallel(self.model)
                         if (
                             getattr(self.args, "use_adaptive_graph", False)
-                            and hasattr(self.model, "dep_graph_builder")
-                            and self.model.dep_graph_builder is not None
+                            and hasattr(_backbone, "dep_graph_builder")
+                            and _backbone.dep_graph_builder is not None
                         ):
                             # 使用预测误差作为样本权重，让图正则在高误差样本上
                             # 起到更强约束作用（error-aware regularization）。
@@ -333,7 +334,7 @@ class Exp_Main_Energy(Exp_Basic):
                             D = batch_y_target.size(-1)
 
                             # Learned adjacency A
-                            A = self.model.dep_graph_builder()  # [D, D]
+                            A = _backbone.dep_graph_builder()  # [D, D]
 
                             # Pairwise squared differences over horizon
                             diff_y = batch_y_target.unsqueeze(-1) - batch_y_target.unsqueeze(-2)  # [B,H,D,D]
@@ -382,10 +383,11 @@ class Exp_Main_Energy(Exp_Basic):
                     # Optional Graph Structure supervision (Dirichlet
                     # energy on ground-truth sequences) when an
                     # adaptive graph builder is attached.
+                    _backbone = unwrap_dataparallel(self.model)
                     if (
                         getattr(self.args, "use_adaptive_graph", False)
-                        and hasattr(self.model, "dep_graph_builder")
-                        and self.model.dep_graph_builder is not None
+                        and hasattr(_backbone, "dep_graph_builder")
+                        and _backbone.dep_graph_builder is not None
                     ):
                         with torch.no_grad():
                             per_sample_mse = (
@@ -399,7 +401,7 @@ class Exp_Main_Energy(Exp_Basic):
                         batch_y_target = batch_y.detach()  # [B, H, D]
                         D = batch_y_target.size(-1)
 
-                        A = self.model.dep_graph_builder()  # [D, D]
+                        A = _backbone.dep_graph_builder()  # [D, D]
 
                         diff_y = batch_y_target.unsqueeze(-1) - batch_y_target.unsqueeze(-2)  # [B,H,D,D]
                         dist_y = (diff_y ** 2).sum(dim=1)  # [B,D,D]
