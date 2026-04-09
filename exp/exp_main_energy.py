@@ -18,7 +18,11 @@ from energy.EnergyModels_patchtst import PatchTSTNeoEBM_concat
 from energy.EnergyModels_timesnet import TimesNetNeoEBM_concat
 from exp.exp_basic import Exp_Basic
 from external_libs.clear_ml_wrapper import SFDB_logger
-from utils.graph_energy_gate import AdaptiveEmbeddingGraphBuilder
+from utils.graph_energy_gate import (
+    AdaptiveEmbeddingGraphBuilder,
+    alignment_loss_struct_vs_mse,
+    compute_structure_energy,
+)
 from models import (
     Autoformer,
     FEDformer,
@@ -350,6 +354,25 @@ class Exp_Main_Energy(Exp_Basic):
                             graph_weight = getattr(self.args, "gate_graph_loss_weight", 0.1)
                             loss = loss + graph_weight * loss_graph
 
+                            align_w = getattr(self.args, "gate_graph_align_weight", 0.05)
+                            if align_w > 0:
+                                with torch.no_grad():
+                                    mse_for_align = (
+                                        (outputs - batch_y) ** 2
+                                    ).mean(dim=(1, 2))
+                                E_pred = compute_structure_energy(
+                                    outputs.detach(), A
+                                )
+                                use_log = getattr(
+                                    self.args, "gate_graph_align_log_mse", True
+                                )
+                                loss_align = alignment_loss_struct_vs_mse(
+                                    E_pred,
+                                    mse_for_align,
+                                    use_log_mse=use_log,
+                                )
+                                loss = loss + align_w * loss_align
+
                         train_loss.append(loss.item())
                 else:
                     if "DLinear" in self.args.model:
@@ -414,6 +437,23 @@ class Exp_Main_Energy(Exp_Basic):
                         loss_graph = (sample_weights * energy_per_sample).mean()
                         graph_weight = getattr(self.args, "gate_graph_loss_weight", 0.1)
                         loss = loss + graph_weight * loss_graph
+
+                        align_w = getattr(self.args, "gate_graph_align_weight", 0.05)
+                        if align_w > 0:
+                            with torch.no_grad():
+                                mse_for_align = (
+                                    (outputs - batch_y) ** 2
+                                ).mean(dim=(1, 2))
+                            E_pred = compute_structure_energy(outputs.detach(), A)
+                            use_log = getattr(
+                                self.args, "gate_graph_align_log_mse", True
+                            )
+                            loss_align = alignment_loss_struct_vs_mse(
+                                E_pred,
+                                mse_for_align,
+                                use_log_mse=use_log,
+                            )
+                            loss = loss + align_w * loss_align
 
                     train_loss.append(loss.item())
 

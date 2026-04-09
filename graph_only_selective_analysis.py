@@ -1,11 +1,30 @@
-import os
+import argparse
 from pathlib import Path
 from types import SimpleNamespace
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+
+
+def _run_matches_output_parent_filter(
+    run_dir: Path, require_substr: Optional[str]
+) -> bool:
+    """Keep only runs whose saved args.output_parent_path contains require_substr."""
+    if not require_substr:
+        return True
+    args_path = run_dir / "args.csv"
+    if not args_path.exists():
+        return False
+    try:
+        df = pd.read_csv(args_path)
+        if df.empty:
+            return False
+        op = df.iloc[0].get("output_parent_path", "")
+        return require_substr in str(op)
+    except Exception:
+        return False
 
 
 def _load_args(args_path: Path) -> SimpleNamespace:
@@ -54,11 +73,20 @@ def _iter_graph_metrics_runs(checkpoints_root: Path) -> List[Tuple[Path, Path, P
     return runs
 
 
-def aggregate_graph_only_metrics(checkpoints_root: Path) -> Tuple[pd.DataFrame, pd.DataFrame]:
+def aggregate_graph_only_metrics(
+    checkpoints_root: Path,
+    require_output_parent_substr: Optional[str] = None,
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """Aggregate per-run graph gate metrics into global val/test DataFrames.
 
     Compatible with graph-only 模式：只依赖 graph_*_metrics_filtered.csv
     和 args.csv，不要求存在任何 EBM 结果文件。
+
+    Args:
+        checkpoints_root: Root to scan (e.g. ./checkpoints).
+        require_output_parent_substr: If set, only runs whose args.csv
+            output_parent_path contains this string are included (same idea
+            as compare_ebm_graph_fusion.py batch filtering).
     """
     all_val: List[pd.DataFrame] = []
     all_test: List[pd.DataFrame] = []
@@ -67,7 +95,17 @@ def aggregate_graph_only_metrics(checkpoints_root: Path) -> Tuple[pd.DataFrame, 
         raise FileNotFoundError(f"Checkpoints root not found: {checkpoints_root}")
 
     runs = _iter_graph_metrics_runs(checkpoints_root)
-    print(f"Found {len(runs)} runs with graph_*_metrics_filtered.csv")
+    if require_output_parent_substr:
+        runs = [
+            r
+            for r in runs
+            if _run_matches_output_parent_filter(r[0], require_output_parent_substr)
+        ]
+    print(f"Found {len(runs)} runs with graph_*_metrics_filtered.csv", end="")
+    if require_output_parent_substr:
+        print(f" (filtered by output_parent_path containing {require_output_parent_substr!r})")
+    else:
+        print()
 
     for run_dir, val_csv, test_csv in runs:
         try:
@@ -208,26 +246,74 @@ def _plot_graph_only_curves(test_df: pd.DataFrame, output_dir: str = "graph_only
 
 
 def main() -> None:
-    checkpoints_root = Path("./checkpoints")
+    parser = argparse.ArgumentParser(
+        description=(
+            "Aggregate graph-only selective metrics from checkpoints and plot "
+            "coverage→MSE curves (no EBM files required)."
+        )
+    )
+    parser.add_argument(
+        "--checkpoints-root",
+        type=str,
+        default="./checkpoints",
+        help="Root directory to scan for runs with graph_*_metrics_filtered.csv.",
+    )
+    parser.add_argument(
+        "--require-output-parent-substr",
+        type=str,
+        default=None,
+        help=(
+            "If set, only include runs whose args.output_parent_path contains "
+            "this substring (e.g. batch folder all_runs_tem_graph_joint_M)."
+        ),
+    )
+    parser.add_argument(
+        "--plot-dir",
+        type=str,
+        default="graph_only_plots",
+        help="Directory for PNG curves (default: graph_only_plots).",
+    )
+    parser.add_argument(
+        "--val-csv",
+        type=str,
+        default="graph_only_val_metrics.csv",
+        help="Output path for aggregated validation metrics CSV.",
+    )
+    parser.add_argument(
+        "--test-csv",
+        type=str,
+        default="graph_only_test_metrics.csv",
+        help="Output path for aggregated test metrics CSV.",
+    )
+    cli = parser.parse_args()
 
-    val_all, test_all = aggregate_graph_only_metrics(checkpoints_root)
+    checkpoints_root = Path(cli.checkpoints_root)
+    val_all, test_all = aggregate_graph_only_metrics(
+        checkpoints_root,
+        require_output_parent_substr=cli.require_output_parent_substr,
+    )
     if val_all.empty or test_all.empty:
         print("No aggregated graph-only metrics; exiting.")
         return
 
     # Save global CSVs.
-    out_val = Path("graph_only_val_metrics.csv")
-    out_test = Path("graph_only_test_metrics.csv")
+    out_val = Path(cli.val_csv)
+    out_test = Path(cli.test_csv)
     val_all.to_csv(out_val, index=False)
     test_all.to_csv(out_test, index=False)
 
     print(f"Saved aggregated validation metrics to {out_val}")
     print(f"Saved aggregated test metrics to {out_test}")
 
-    # Quick text summary on test split.
+    # Quick text summary on test split (per backbone when model column exists).
     print("\n=== Graph-only test split summary (by dataset, coverage) ===")
+    group_keys = (
+        ["model", "dataset", "target_coverage"]
+        if "model" in test_all.columns
+        else ["dataset", "target_coverage"]
+    )
     summary = (
-        test_all.groupby(["dataset", "target_coverage"])[
+        test_all.groupby(group_keys)[
             ["train_coverage", "split_mse_selected", "split_mse_orig"]
         ]
         .mean()
@@ -241,7 +327,7 @@ def main() -> None:
     print(summary.to_string(index=False))
 
     # Plot coverage→MSE curves for graph-only.
-    _plot_graph_only_curves(test_all, output_dir="graph_only_plots")
+    _plot_graph_only_curves(test_all, output_dir=cli.plot_dir)
 
 
 if __name__ == "__main__":

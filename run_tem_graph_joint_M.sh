@@ -29,8 +29,9 @@ set -e
 #   all        : 默认，全流程（训练 backbone+EBM+Graph 头 + TEM/EBM 分析 +
 #                Graph gate + offline compare_ebm_graph_fusion.py + 画图）
 #   graph_only : 只训练 backbone + Graph 头，并运行在线 Graph gate，完全
-#                跳过 EBM 训练和 TEM/EBM 分析；同时不自动调用离线
-#                compare_ebm_graph_fusion.py 和 plot_ebm_graph_fusion_curves.py。
+#                跳过 EBM 训练和 TEM/EBM 分析；结束后自动调用
+#                graph_only_selective_analysis.py（只汇总 output 在 OUT_ROOT
+#                下的 run，避免混入 checkpoints 里其他实验）。
 RUN_MODE=${RUN_MODE:-all}
 
 # You can override this before calling the script if needed
@@ -95,7 +96,7 @@ for model in "${MODELS[@]}"; do
   done
 done
 
-  if [ "${RUN_MODE}" = "all" ]; then
+if [ "${RUN_MODE}" = "all" ]; then
     echo "==============================================="
     echo "[OFFLINE] Aggregating EBM-only / Graph-only / Fusion curves..."
     echo "         (only runs with output under ${OUT_ROOT})"
@@ -110,9 +111,20 @@ done
     python plot_ebm_graph_fusion_curves.py
 
     echo "Done. Check ebm_graph_fusion_test_metrics.csv and plots_ebm_graph_fusion/*.png for TEM-only (ebm_only), Graph-only (graph_only), and Joint (fusion) results."
-  else
+elif [ "${RUN_MODE}" = "graph_only" ]; then
     echo "==============================================="
-    echo "[SKIP OFFLINE] RUN_MODE=${RUN_MODE}, skipping compare_ebm_graph_fusion.py and plot_ebm_graph_fusion_curves.py."
+    echo "[GRAPH-ONLY ANALYSIS] Aggregating graph gate metrics + plots..."
+    echo "         (only runs with output under ${OUT_ROOT})"
+    echo "==============================================="
+    python graph_only_selective_analysis.py \
+      --checkpoints-root "./checkpoints" \
+      --require-output-parent-substr "${OUT_ROOT}" \
+      --plot-dir "./graph_only_plots"
+
+    echo "Done. Check graph_only_test_metrics.csv and graph_only_plots/ for this batch."
+else
+    echo "==============================================="
+    echo "[SKIP OFFLINE] RUN_MODE=${RUN_MODE}, skipping batch aggregation scripts."
     echo "You can inspect per-run Graph gate metrics under each checkpoint's local_pics_*/graph_*_metrics_filtered.csv."
     echo "==============================================="
-  fi
+fi

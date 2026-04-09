@@ -28,6 +28,9 @@ def get_default_args():
         # will be enabled automatically for multivariate (M) tasks
         # after parsing CLI args.
         "use_adaptive_graph": False,
+        # When use_adaptive_graph: extra term to match graph energy on preds vs MSE (see graph_energy_gate).
+        "gate_graph_align_weight": 0.05,
+        "gate_graph_align_log_mse": True,
         
         "data": "custom",  
         "site_id": "None",

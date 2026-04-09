@@ -31,7 +31,7 @@ class Normalizer:
 
 
 class DependencyGraphBuilder:
-    """Interface for building a dependency matrix A(X) \in R^{D x D}."""
+    """Interface for building a dependency matrix A(X) of shape (D, D)."""
 
     def build(
         self,
@@ -196,6 +196,47 @@ def compute_structure_energy(y_hat: Tensor, A: Tensor) -> Tensor:
     # Normalize by number of pairs for scale stability
     E_struct = E_struct / float(D * D)
     return E_struct
+
+
+def alignment_loss_struct_vs_mse(
+    E_struct: Tensor,
+    per_sample_mse: Tensor,
+    eps: float = 1e-6,
+    use_log_mse: bool = True,
+) -> Tensor:
+    """Differentiable alignment: encourage higher graph energy when MSE is higher.
+
+    GraphEnergyGate accepts samples with *low* normalized structural energy;
+    calibration thresholds the energy distribution. Thus we want a *positive*
+    monotonic relationship: large per-sample MSE should co-occur with large
+    E_struct on the same forecasts.
+
+    Uses negative batch Pearson correlation between E_struct and (log) MSE.
+    Minimizing this loss increases correlation. With batch size < 2, returns 0.
+
+    Args:
+        E_struct: [B] from ``compute_structure_energy(y_hat, A)``.
+        per_sample_mse: [B] non-negative errors (typically detached).
+        use_log_mse: Map MSE through log1p for heavy-tailed batch statistics.
+    """
+    if E_struct.ndim != 1 or per_sample_mse.ndim != 1:
+        raise ValueError("E_struct and per_sample_mse must be 1D [B]")
+    if E_struct.shape[0] != per_sample_mse.shape[0]:
+        raise ValueError("Batch size mismatch between energy and MSE")
+
+    B = E_struct.shape[0]
+    if B < 2:
+        return E_struct.new_zeros(())
+
+    E = E_struct.float().reshape(-1)
+    m = per_sample_mse.float().reshape(-1)
+    if use_log_mse:
+        m = torch.log1p(m.clamp_min(0.0))
+
+    Ez = (E - E.mean()) / (E.std(unbiased=False) + eps)
+    Mz = (m - m.mean()) / (m.std(unbiased=False) + eps)
+    # Minimize negative correlation <=> maximize Pearson(E, m)
+    return -(Ez * Mz).mean()
 
 
 @dataclass
