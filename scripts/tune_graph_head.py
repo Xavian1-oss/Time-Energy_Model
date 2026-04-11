@@ -10,7 +10,7 @@ from `graph_val_metrics_filtered.csv` (under `analysis_dir` in `run_summary.txt`
 By default the score is validation `split_mse_selected` at the coverage row closest to
 `--target_coverage` (graph selective prediction). Lower is better.
 
-Example (graph-only, same spirit as RUN_MODE=graph_only in run_tem_graph_joint_M.sh):
+Example (graph-only, same spirit as RUN_MODE=graph_only in scripts/run_tem_graph_joint_M.sh):
 
   python scripts/tune_graph_head.py \\
     --model Autoformer \\
@@ -102,7 +102,7 @@ def _run_one(
     des = _des_token(w_loss, w_align)
     cmd = [
         python,
-        str(repo / "run_ebmExp.py"),
+        str(repo / "scripts" / "run_ebmExp.py"),
         "--model",
         model,
         "--data_path",

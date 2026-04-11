@@ -9,28 +9,32 @@
 #      (model, data_path) pair in M mode (graph_mode=auto).
 #   2) Run online TEM selective inference and graph-based gate.
 #   3) (Optional) Aggregate offline EBM-only / Graph-only / Fusion curves
-#      using compare_ebm_graph_fusion.py.
+#      using scripts/compare_ebm_graph_fusion.py.
 #   4) (Optional) Plot test coverage→MSE curves per dataset via
-#      plot_ebm_graph_fusion_curves.py.
+#      scripts/plot_ebm_graph_fusion_curves.py.
 #
-# Usage:
-#   chmod +x run_tem_graph_joint_M.sh
+# Usage (from repository root):
+#   chmod +x scripts/run_tem_graph_joint_M.sh
 #   # 默认：跑 TEM + Graph + Fusion 全流程
-#   ./run_tem_graph_joint_M.sh
+#   ./scripts/run_tem_graph_joint_M.sh
 #   # 只跑训练 + 在线 Graph gate，不做离线 EBM/Graph/Fusion 汇总和画图：
-#   RUN_MODE=graph_only ./run_tem_graph_joint_M.sh
+#   RUN_MODE=graph_only ./scripts/run_tem_graph_joint_M.sh
 #
 # You can edit the MODELS / DATA_PATHS arrays below to match the
 # experiments you care about.
 
 set -e
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+cd "${REPO_ROOT}"
+
 # RUN_MODE 控制是否训练 EBM 以及是否执行离线 EBM/Graph/Fusion 汇总与画图：
 #   all        : 默认，全流程（训练 backbone+EBM+Graph 头 + TEM/EBM 分析 +
-#                Graph gate + offline compare_ebm_graph_fusion.py + 画图）
+#                Graph gate + offline scripts/compare_ebm_graph_fusion.py + 画图）
 #   graph_only : 只训练 backbone + Graph 头，并运行在线 Graph gate，完全
 #                跳过 EBM 训练和 TEM/EBM 分析；结束后自动调用
-#                graph_only_selective_analysis.py（只汇总 output 在 OUT_ROOT
+#                scripts/graph_only_selective_analysis.py（只汇总 output 在 OUT_ROOT
 #                下的 run，避免混入 checkpoints 里其他实验）。
 RUN_MODE=${RUN_MODE:-all}
 
@@ -74,7 +78,7 @@ for model in "${MODELS[@]}"; do
     if [ "${RUN_MODE}" = "graph_only" ]; then
       # 真正的 graph-only：不训练 EBM，不跑 TEM/EBM 分析，只训练
       # backbone+Graph 头并运行在线 Graph gate。
-      python run_ebmExp.py \
+      python scripts/run_ebmExp.py \
         --model "${model}" \
         --data_path "${data_path}" \
         --features M \
@@ -84,7 +88,7 @@ for model in "${MODELS[@]}"; do
         --graph_mode auto \
         --ebm_mode none
     else
-      python run_ebmExp.py \
+      python scripts/run_ebmExp.py \
         --model "${model}" \
         --data_path "${data_path}" \
         --features M \
@@ -101,14 +105,14 @@ if [ "${RUN_MODE}" = "all" ]; then
     echo "[OFFLINE] Aggregating EBM-only / Graph-only / Fusion curves..."
     echo "         (only runs with output under ${OUT_ROOT})"
     echo "==============================================="
-    python compare_ebm_graph_fusion.py \
+    python scripts/compare_ebm_graph_fusion.py \
       --checkpoints-root "./checkpoints" \
       --require-output-parent-substr "${OUT_ROOT}"
 
     echo "==============================================="
     echo "[PLOT] Drawing test coverage→MSE curves per dataset..."
     echo "==============================================="
-    python plot_ebm_graph_fusion_curves.py
+    python scripts/plot_ebm_graph_fusion_curves.py
 
     echo "Done. Check ebm_graph_fusion_test_metrics.csv and plots_ebm_graph_fusion/*.png for TEM-only (ebm_only), Graph-only (graph_only), and Joint (fusion) results."
 elif [ "${RUN_MODE}" = "graph_only" ]; then
@@ -116,7 +120,7 @@ elif [ "${RUN_MODE}" = "graph_only" ]; then
     echo "[GRAPH-ONLY ANALYSIS] Aggregating graph gate metrics + plots..."
     echo "         (only runs with output under ${OUT_ROOT})"
     echo "==============================================="
-    python graph_only_selective_analysis.py \
+    python scripts/graph_only_selective_analysis.py \
       --checkpoints-root "./checkpoints" \
       --require-output-parent-substr "${OUT_ROOT}" \
       --plot-dir "./graph_only_plots"

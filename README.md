@@ -7,6 +7,20 @@ Last updated: 2025-02-28
 
 The TEM framework has been refactored to simplify usage by hardcoding most parameters while exposing only the most important ones for customization. This makes it easier to run experiments without having to specify dozens of parameters.
 
+## Scripts (experiment drivers)
+
+Experiment and batch utilities live under [`scripts/`](scripts/):
+
+| Path | Role |
+|------|------|
+| [`scripts/run_ebmExp.py`](scripts/run_ebmExp.py) | Main training and evaluation entry (the repo root [`run_ebmExp.py`](run_ebmExp.py) forwards to this file for backward compatibility). |
+| [`scripts/run_tem_graph_joint_M.sh`](scripts/run_tem_graph_joint_M.sh) | Batch runs for multivariate (`M`) TEM + graph + optional fusion; run from repo root: `./scripts/run_tem_graph_joint_M.sh`. |
+| [`scripts/tune_graph_head.py`](scripts/tune_graph_head.py) | Grid search for `gate_graph_loss_weight` and `gate_graph_align_weight`. |
+| [`scripts/compare_ebm_graph_fusion.py`](scripts/compare_ebm_graph_fusion.py) | Offline aggregation of EBM-only / graph-only / fusion selective metrics. |
+| [`scripts/graph_only_selective_analysis.py`](scripts/graph_only_selective_analysis.py) | Aggregate graph-only gate metrics and plot coverage–MSE curves. |
+| [`scripts/plot_ebm_graph_fusion_curves.py`](scripts/plot_ebm_graph_fusion_curves.py) | Plot curves from `ebm_graph_fusion_test_metrics.csv`. |
+| [`scripts/summarize_mse_changes.py`](scripts/summarize_mse_changes.py) | Scan `checkpoints/` for `*_metrics_filtered.csv` and summarize MSE deltas. |
+
 ## Required setup
 
 1. Make sure to have the required packages installed as defined in the requirements.txt file 
@@ -16,7 +30,7 @@ The TEM framework has been refactored to simplify usage by hardcoding most param
 
 ## Required Parameters
 
-When running `run_ebmExp.py`, you only need to specify the following parameters:
+When running `run_ebmExp.py` (or `python scripts/run_ebmExp.py`), you only need to specify the following parameters:
 
 1. `--model`: The forecasting model architecture to use
    - Options: `TimesNet`, `Autoformer`, `Informer`, `FEDformer`, `PatchTST`
@@ -110,7 +124,7 @@ Most parameters are hardcoded with sensible defaults. The key defaults include:
 - d_ff: 32 
 - dropout: 0.05
 
-For a complete list of default values, refer to the `get_default_args()` function in the `run_ebmExp.py` script.
+For a complete list of default values, refer to the `get_default_args()` function in [`scripts/run_ebmExp.py`](scripts/run_ebmExp.py).
 
 ## Model-Specific Configurations
 
