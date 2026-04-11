@@ -38,7 +38,7 @@ RUN_MODE=${RUN_MODE:-all}
 export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0}
 
 # Models to evaluate
-MODELS=("PatchTST" "Autoformer")
+MODELS=("TimesNet" "Informer")
 
 # Data paths (CSV filenames under ./dataset)
 DATA_PATHS=(
