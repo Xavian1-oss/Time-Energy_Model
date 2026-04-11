@@ -28,6 +28,8 @@ def get_default_args():
         # will be enabled automatically for multivariate (M) tasks
         # after parsing CLI args.
         "use_adaptive_graph": False,
+        # When use_adaptive_graph: Dirichlet graph regularization vs ground-truth graph (see exp_main_energy).
+        "gate_graph_loss_weight": 0.1,
         # When use_adaptive_graph: extra term to match graph energy on preds vs MSE (see graph_energy_gate).
         "gate_graph_align_weight": 0.05,
         "gate_graph_align_log_mse": True,
@@ -321,6 +323,30 @@ def create_simplified_parser():
         required=False,
         default=None,
         help="Override auto-derived checkpoint id (default embeds dataset + model + seq_len).",
+    )
+
+    parser.add_argument(
+        "--des",
+        type=str,
+        required=False,
+        default=None,
+        help="Experiment tag embedded in checkpoint folder names (default: experiment).",
+    )
+
+    parser.add_argument(
+        "--gate_graph_loss_weight",
+        type=float,
+        required=False,
+        default=None,
+        help="Ground-truth Dirichlet graph regularization weight (default: 0.1).",
+    )
+
+    parser.add_argument(
+        "--gate_graph_align_weight",
+        type=float,
+        required=False,
+        default=None,
+        help="Pearson alignment between structural energy and log(1+MSE) (default: 0.05).",
     )
 
     return parser
