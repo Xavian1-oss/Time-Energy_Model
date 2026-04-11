@@ -1033,7 +1033,9 @@ class Exp_Main_Energy(Exp_Basic):
                 epoch_time = time.time()
 
                 if epoch == 0:
-                    print(f"Y ENCODER TRAIN loader size: {len(y_encoder_train_epochs)}")
+                    print(
+                        f"Y ENCODER TRAIN loader size: {len(experiment_data.train_loader)}"
+                    )
 
                 for i, (batch_x, batch_y, batch_x_mark, batch_y_mark) in enumerate(
                     experiment_data.train_loader

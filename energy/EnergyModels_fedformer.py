@@ -98,7 +98,9 @@ class FedformerNeoEBM_concat(AutoformerNeoEBM):
             [torch.zeros_like(batch_y[:, : -self.orig_model_pred_len, :]), actual_y],
             dim=1,
         )
-        encoded_y = self.y_encoder(reshaped_batch_y)
+        B, T, C = reshaped_batch_y.shape
+        y_in = reshaped_batch_y.reshape(B, T * C, 1)
+        encoded_y = self.y_encoder(y_in)
         reshaped_encoded_y = encoded_y.reshape(
             reshaped_batch_y.shape[0],
             (self.orig_model_seq_len),
