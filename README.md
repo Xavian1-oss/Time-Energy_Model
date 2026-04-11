@@ -19,6 +19,7 @@ Experiment and batch utilities live under [`scripts/`](scripts/):
 | [`scripts/graph_only_selective_analysis.py`](scripts/graph_only_selective_analysis.py) | Aggregate graph-only gate metrics and plot coverage–MSE curves. |
 | [`scripts/plot_ebm_graph_fusion_curves.py`](scripts/plot_ebm_graph_fusion_curves.py) | Plot curves from `ebm_graph_fusion_test_metrics.csv`. |
 | [`scripts/summarize_mse_changes.py`](scripts/summarize_mse_changes.py) | Scan `checkpoints/` for `*_metrics_filtered.csv` and summarize MSE deltas. |
+| [`scripts/export_graph_only_latex.py`](scripts/export_graph_only_latex.py) | Regenerate [`docs/experiments_graph_only_tables.tex`](docs/experiments_graph_only_tables.tex) from `graph_only_*_metrics.csv`. |
 
 ## Required setup
 

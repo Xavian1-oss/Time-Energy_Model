@@ -1,0 +1,202 @@
+#!/usr/bin/env python3
+"""Generate NeurIPS-style LaTeX tables from graph_only_{val,test}_metrics.csv."""
+
+from __future__ import annotations
+
+import csv
+import sys
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple
+
+
+def _repo_root() -> Path:
+    return Path(__file__).resolve().parent.parent
+
+
+def _load(path: Path) -> List[dict]:
+    with open(path, newline="", encoding="utf-8") as f:
+        return list(csv.DictReader(f))
+
+
+def _f(x: str) -> Optional[float]:
+    try:
+        return float(x)
+    except (TypeError, ValueError):
+        return None
+
+
+def _pick(
+    rows: List[dict], split: str, target_cov: float
+) -> Dict[Tuple[str, str], Tuple[float, float, float]]:
+    out: Dict[Tuple[str, str], Tuple[float, float, float]] = {}
+    for r in rows:
+        if r.get("split") != split:
+            continue
+        if _f(r.get("target_coverage")) != target_cov:
+            continue
+        ds = r.get("dataset", "")
+        m = r.get("model", "")
+        ms = _f(r.get("split_mse_selected"))
+        mo = _f(r.get("split_mse_orig"))
+        tc = _f(r.get("train_coverage"))
+        if ms is None or mo is None or tc is None:
+            continue
+        out[(ds, m)] = (ms, mo, tc)
+    return out
+
+
+def _fmt(x: float, nd: int = 4) -> str:
+    """Fixed decimals for aligned numeric columns (NeurIPS-friendly)."""
+    return f"{x:.{nd}f}"
+
+
+def _tex_escape_dataset(name: str) -> str:
+    return name.replace("_", r"\_")
+
+
+def build_tabular(
+    data: Dict[Tuple[str, str], Tuple[float, float, float]],
+    models: List[str],
+    datasets: List[str],
+) -> str:
+    n = len(models)
+    colspec = "l" + "ccc" * n
+    lines: List[str] = []
+    lines.append(r"\begin{tabular}{" + colspec + "}")
+    lines.append(r"\toprule")
+    row1 = [r"\textbf{Dataset}"]
+    for m in models:
+        row1.append(r"\multicolumn{3}{c}{\textbf{" + m + "}}")
+    lines.append(" & ".join(row1) + r" \\")
+    cmid = []
+    c = 2
+    for _ in models:
+        cmid.append(rf"\cmidrule(lr){{{c}-{c+2}}}")
+        c += 3
+    lines.append(" ".join(cmid))
+    row2 = [""]
+    for _ in models:
+        row2.extend(
+            [
+                r"MSE$_{\mathrm{sel}}$",
+                r"MSE$_{\mathrm{orig}}$",
+                r"Cov.",
+            ]
+        )
+    lines.append(" & ".join(row2) + r" \\")
+    lines.append(r"\midrule")
+    for ds in datasets:
+        row = [_tex_escape_dataset(ds)]
+        for m in models:
+            key = (ds, m)
+            if key not in data:
+                row.extend(["---", "---", "---"])
+            else:
+                ms, mo, tc = data[key]
+                row.append(_fmt(ms))
+                row.append(_fmt(mo))
+                row.append(_fmt(tc, 3))
+        lines.append(" & ".join(row) + r" \\")
+    lines.append(r"\bottomrule")
+    lines.append(r"\end{tabular}")
+    return "\n".join(lines)
+
+
+def neurips_table_star(
+    tabular_tex: str,
+    caption: str,
+    label: str,
+) -> str:
+    """NeurIPS 2026: full-width ``table*``, caption *before* the tabular (author handbook)."""
+    return f"""\\begin{{table*}}[t]
+  \\centering
+  \\footnotesize
+  \\caption{{{caption}}}
+  \\label{{{label}}}
+  \\medskip
+  \\setlength{{\\tabcolsep}}{{3pt}}
+  \\resizebox{{\\textwidth}}{{!}}{{%
+{ _indent(tabular_tex, 4) }%
+  }}
+\\end{{table*}}"""
+
+
+def _indent(s: str, spaces: int) -> str:
+    pad = " " * spaces
+    return "\n".join(pad + line if line.strip() else line for line in s.splitlines())
+
+
+def main() -> None:
+    root = _repo_root()
+    out_path = root / "docs" / "experiments_graph_only_tables.tex"
+    models = ["PatchTST", "Autoformer", "Informer", "TimesNet"]
+    datasets = [
+        "ETTh1",
+        "ETTh2",
+        "ETTm1",
+        "ETTm2",
+        "electricity",
+        "exchange_rate",
+        "national_illness",
+        "traffic",
+        "weather",
+    ]
+    target = 0.9
+
+    test_csv = root / "graph_only_test_metrics.csv"
+    val_csv = root / "graph_only_val_metrics.csv"
+    if not test_csv.is_file():
+        print(f"Missing {test_csv}", file=sys.stderr)
+        sys.exit(1)
+
+    test_rows = _load(test_csv)
+    val_rows = _load(val_csv) if val_csv.is_file() else []
+
+    test_data = _pick(test_rows, "test", target)
+    val_data = _pick(val_rows, "val", target)
+
+    # NeurIPS 2026: table title sentence case (except proper names / first word).
+    cap_test = (
+        r"Graph-only selective inference on the \emph{test} split at target coverage $0.9$. "
+        r"MSE$_{\mathrm{sel}}$: graph-gate selective prediction; "
+        r"MSE$_{\mathrm{orig}}$: full prediction without selection; "
+        r"Cov.: empirical coverage on the test split."
+    )
+    cap_val = (
+        r"Graph-only selective inference on the \emph{validation} split at target coverage $0.9$. "
+        r"Same columns as Table~\ref{tab:graph_only_test}. "
+        r"Cov.: empirical coverage on the validation split."
+    )
+
+    parts = [
+        r"% Auto-generated by scripts/export_graph_only_latex.py",
+        r"% NeurIPS 2026: follow the official template (\usepackage{neurips_2026}).",
+        r"% Tables: caption before the tabular; no vertical rules (booktabs).",
+        r"% Preamble also needs: \usepackage{booktabs} \usepackage{graphicx}",
+        "",
+        neurips_table_star(
+            build_tabular(test_data, models, datasets),
+            cap_test,
+            "tab:graph_only_test",
+        ),
+        "",
+    ]
+    if val_data:
+        parts.append(
+            neurips_table_star(
+                build_tabular(val_data, models, datasets),
+                cap_val,
+                "tab:graph_only_val",
+            )
+        )
+    else:
+        parts.append(r"% (skipped: no graph_only_val_metrics.csv rows)")
+
+    parts.append("")
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text("\n".join(parts), encoding="utf-8")
+    print(f"Wrote {out_path}")
+
+
+if __name__ == "__main__":
+    main()

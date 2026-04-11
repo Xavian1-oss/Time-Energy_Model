@@ -389,8 +389,10 @@ class Exp_Main_Energy(Exp_Basic):
                                 
                                 log_output_model = False
                         else:
+                            # Must match AMP branch: do not pass batch_y as a 5th arg (Informer/
+                            # Autoformer interpret it as attention masks; PatchTST as mask=).
                             outputs = self.model(
-                                batch_x, batch_x_mark, dec_inp, batch_y_mark, batch_y
+                                batch_x, batch_x_mark, dec_inp, batch_y_mark
                             )
                             if log_output_model:
                                 
@@ -618,7 +620,7 @@ class Exp_Main_Energy(Exp_Basic):
                                 log_output_model = False
                         else:
                             outputs = self.model(
-                                batch_x, batch_x_mark, dec_inp, batch_y_mark, batch_y
+                                batch_x, batch_x_mark, dec_inp, batch_y_mark
                             )
                             if log_output_model:
                                 log_output_model = False

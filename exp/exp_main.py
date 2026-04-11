@@ -194,7 +194,7 @@ class Exp_Main(Exp_Basic):
                                 print(summary(self.model, [batch_x, batch_x_mark, dec_inp, batch_y_mark]))
                                 log_output_model = False
                         else:
-                            outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark, batch_y)
+                            outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
                             if (log_output_model):
                                 print(summary(self.model, [batch_x, batch_x_mark, dec_inp, batch_y_mark]))
                                 log_output_model = False
