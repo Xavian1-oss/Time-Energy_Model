@@ -1,7 +1,16 @@
 import argparse
+import random
+import sys
+from pathlib import Path
+
+# Running as `python scripts/run_ebmExp.py` puts `scripts/` on sys.path first;
+# project modules (analysis, exp, ...) live at the repository root.
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
 import numpy as np
 import pandas as pd
-import random
 import torch
 
 import analysis
@@ -11,7 +20,6 @@ from exp.exp_main_energy import Exp_Main_Energy
 from run_commons import TorchDeviceUtils, ExperimentConstants
 from torch_utils import unwrap_dataparallel
 from utilz import *
-from pathlib import Path
 
 
 def get_default_args():
