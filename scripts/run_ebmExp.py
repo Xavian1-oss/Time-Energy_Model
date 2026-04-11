@@ -333,30 +333,6 @@ def create_simplified_parser():
         help="Override auto-derived checkpoint id (default embeds dataset + model + seq_len).",
     )
 
-    parser.add_argument(
-        "--des",
-        type=str,
-        required=False,
-        default=None,
-        help="Experiment tag embedded in checkpoint folder names (default: experiment).",
-    )
-
-    parser.add_argument(
-        "--gate_graph_loss_weight",
-        type=float,
-        required=False,
-        default=None,
-        help="Ground-truth Dirichlet graph regularization weight (default: 0.1).",
-    )
-
-    parser.add_argument(
-        "--gate_graph_align_weight",
-        type=float,
-        required=False,
-        default=None,
-        help="Pearson alignment between structural energy and log(1+MSE) (default: 0.05).",
-    )
-
     return parser
 
 

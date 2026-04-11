@@ -15,7 +15,6 @@ Experiment and batch utilities live under [`scripts/`](scripts/):
 |------|------|
 | [`scripts/run_ebmExp.py`](scripts/run_ebmExp.py) | Main training and evaluation entry (the repo root [`run_ebmExp.py`](run_ebmExp.py) forwards to this file for backward compatibility). |
 | [`scripts/run_tem_graph_joint_M.sh`](scripts/run_tem_graph_joint_M.sh) | Batch runs for multivariate (`M`) TEM + graph + optional fusion; run from repo root: `./scripts/run_tem_graph_joint_M.sh`. |
-| [`scripts/tune_graph_head.py`](scripts/tune_graph_head.py) | Grid search for `gate_graph_loss_weight` and `gate_graph_align_weight`. |
 | [`scripts/compare_ebm_graph_fusion.py`](scripts/compare_ebm_graph_fusion.py) | Offline aggregation of EBM-only / graph-only / fusion selective metrics. |
 | [`scripts/graph_only_selective_analysis.py`](scripts/graph_only_selective_analysis.py) | Aggregate graph-only gate metrics and plot coverage–MSE curves. |
 | [`scripts/plot_ebm_graph_fusion_curves.py`](scripts/plot_ebm_graph_fusion_curves.py) | Plot curves from `ebm_graph_fusion_test_metrics.csv`. |
