@@ -1,8 +1,15 @@
 import argparse
 import os
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 from typing import List, Optional, Tuple
+
+# Running as `python scripts/compare_ebm_graph_fusion.py` puts `scripts/` on
+# sys.path first; project modules (utils, ...) live at the repository root.
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
 
 import numpy as np
 import pandas as pd
