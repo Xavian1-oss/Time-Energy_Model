@@ -90,64 +90,34 @@ class TimesNetNeoEBM_concat(AutoformerNeoEBM):
         print(f"Setup for of Y encoder and XY decoder done!")
 
     def _forward_y_enc(self, batch_y):
-        actual_y = batch_y[:, -self.orig_model_pred_len :, :]
-        
-        
-        
-        
-        encoded_y = self.y_encoder(actual_y)
-        reshaped_encoded_y = encoded_y.reshape(
-            actual_y.shape[0],
-            
-            (self.orig_model_seq_len + self.orig_model_pred_len),
-            self.orig_model_d_model,
-        )
-        return reshaped_encoded_y
-
-    def _forward_y_enc(self, batch_y):
         """Encode target sequence y for TimesNet-based NeoEBM.
 
-        MultisampleMLPDecoder flattens the (batch, sample/channel) axes,
-        and for TimesNet the configured output_dim can include an extra
-        multiplicative factor (e.g., number of input channels). Instead
-        of assuming a fixed output dimension, we infer this factor and
-        reshape back to a tensor compatible with the backbone encoder
-        output: [B, seq_len + pred_len, d_model].
+        ``setup_y_encoder_and_xy_decoder_`` sets ``input_dim = pred_len * c_out``.
+        ``MultisampleMLPDecoder`` must receive ``[B, pred_len * c_out, 1]`` so the
+        first linear sees a vector of length ``pred_len * c_out``, not
+        ``[B, pred_len, c_out]`` (which is misread as length ``pred_len`` with
+        ``num_samples = c_out``).
         """
 
-        # Use only the prediction window; TimesNet batches batch_y
-        # typically as [B, pred_len, C_out].
         actual_y = batch_y[:, -self.orig_model_pred_len :, :]
+        B, T, C = actual_y.shape
+        y_in = actual_y.reshape(B, T * C, 1)
+        encoded_y = self.y_encoder(y_in)
 
-        B = actual_y.shape[0]
-        encoded_y = self.y_encoder(actual_y)
-
-        # Collapse any sample/channel dimension introduced by
-        # MultisampleMLPDecoder into a single flat dimension per batch
-        # element.
-        encoded_y = encoded_y.contiguous().view(B, -1)
-
-        total_seq = self.orig_model_seq_len + self.orig_model_pred_len
-        D = self.orig_model_d_model
-        base = B * total_seq * D
-        total_numel = int(encoded_y.numel())
-
-        if total_numel % base != 0:
+        odim = self.y_encoder.output_dim
+        dmd = self.orig_model_d_model
+        if odim % dmd != 0:
             raise RuntimeError(
-                f"TimesNetNeoEBM_concat: encoded_y.numel()={total_numel} "
-                f"is not divisible by B * (seq_len+pred_len) * d_model = {base}. "
-                f"Shapes: B={B}, total_seq={total_seq}, D={D}, "
-                f"encoded_y.shape={tuple(encoded_y.shape)}"
+                f"TimesNetNeoEBM_concat: y_encoder.output_dim={odim} not divisible "
+                f"by d_model={dmd}"
             )
-
-        # Inferred multiplicity factor (e.g., enc_in or other flattening).
-        K = total_numel // base
-        encoded_y = encoded_y.view(B, K, total_seq, D)
-
-        # Aggregate over the multiplicity dimension to recover a
-        # [B, total_seq, D] representation compatible with enc_out.
-        reshaped_encoded_y = encoded_y.mean(dim=1)
-        return reshaped_encoded_y
+        tdim = odim // dmd
+        if encoded_y.shape != (B, odim):
+            raise RuntimeError(
+                f"TimesNetNeoEBM_concat: encoded_y shape {tuple(encoded_y.shape)}; "
+                f"expected ({B}, {odim})"
+            )
+        return encoded_y.view(B, tdim, dmd)
 
     def _get_decoded(
         self,
