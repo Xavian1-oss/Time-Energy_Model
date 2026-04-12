@@ -1,0 +1,6 @@
+name: env_time_energy
+channels:
+  - defaults
+dependencies:
+  - python=3.10
+prefix: /home/env_time_energy
