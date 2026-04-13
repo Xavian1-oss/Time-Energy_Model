@@ -93,49 +93,32 @@ class PatchTSTNeoEBM_concat(AutoformerNeoEBM):
         print("Setup for of Y encoder and XY decoder done!")
 
     def _forward_y_enc(self, batch_y: torch.Tensor) -> torch.Tensor:
-        # Use only the prediction window from the original model output
+        """Encode prediction-window targets; shape matches ``enc_out`` for ``cat``."""
+
         actual_y = batch_y[:, -self.orig_model_pred_len :, :]
+        B, T, C = actual_y.shape
+        # setup uses input_dim = pred_len * c_out; MultisampleMLPDecoder needs
+        # [B, pred_len * c_out, 1], not [B, pred_len, c_out] (misread as length pred_len
+        # with num_samples = c_out).
+        y_in = actual_y.reshape(B, T * C, 1)
+        encoded_y = self.y_encoder(y_in)
 
-        # MultisampleMLPDecoder expects input of shape
-        # [batch, input_dim_local, num_samples]
-        # Here: input_dim_local = pred_len, num_samples = c_out
-        encoded_y = self.y_encoder(actual_y)
-
-        batch_shape = actual_y.shape[0]
-        c_out_shape = actual_y.shape[2]
-
-        total_expected = self.dec_out_2_dim * self.orig_model_d_model * self.magic_number
-
-        # Case 1: single-output (c_out == 1) — original behavior
-        if encoded_y.numel() == batch_shape * total_expected:
-            reshaped_encoded_y = encoded_y.reshape(
-                batch_shape,
-                self.dec_out_2_dim,
-                self.orig_model_d_model,
-                self.magic_number,
+        odim = self.y_encoder.output_dim
+        dmd = self.orig_model_d_model
+        mn = self.magic_number
+        dec_dim = self.dec_out_2_dim
+        expected = dec_dim * dmd * mn
+        if odim != expected:
+            raise RuntimeError(
+                f"PatchTSTNeoEBM: y_encoder.output_dim={odim} != "
+                f"dec_out_2_dim*d_model*magic_number={expected}"
             )
-        else:
-            # Case 2: multi-output (c_out > 1)
-            # MultisampleMLPDecoder flattens batch and num_samples:
-            # encoded_y.shape[0] should be batch_shape * c_out_shape
-            if encoded_y.shape[0] != batch_shape * c_out_shape:
-                raise RuntimeError(
-                    f"Unexpected encoded_y shape {encoded_y.shape} for batch={batch_shape}, c_out={c_out_shape}"
-                )
-
-            # Recover [batch, c_out, dec_out_2_dim, d_model, magic_number]
-            encoded_y = encoded_y.view(
-                batch_shape,
-                c_out_shape,
-                self.dec_out_2_dim,
-                self.orig_model_d_model,
-                self.magic_number,
+        if encoded_y.shape != (B, odim):
+            raise RuntimeError(
+                f"PatchTSTNeoEBM: encoded_y shape {tuple(encoded_y.shape)}; "
+                f"expected ({B}, {odim})"
             )
-
-            # Aggregate over output channels (simple average)
-            reshaped_encoded_y = encoded_y.mean(dim=1)
-
-        return reshaped_encoded_y
+        return encoded_y.view(B, dec_dim, dmd, mn)
 
     def _get_decoded(
         self,
