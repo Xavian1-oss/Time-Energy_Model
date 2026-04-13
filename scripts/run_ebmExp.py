@@ -9,6 +9,8 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
+import zipfile
+
 import numpy as np
 import pandas as pd
 import torch
@@ -564,20 +566,33 @@ def run_analysis(
             ignore_cached_result_objects_except_train and data_loader_name != "train"
         )
         if not ignore_cache and cache_path.exists():
-            result_object = dict(np.load(str(cache_path), allow_pickle=True))
-            dataset = getattr(experiment_data, f"{data_loader_name}_data")
-        else:
-            data_to_use = (
-                override_data if override_data is not None else experiment_data
-            )
-            result_object, dataset = exp.test_adhoc_energy(
-                path_to_given_model,
-                experiment_data=data_to_use,
-                # 简化版统计不再依赖噪声采样结果，这里关闭宽泛噪声实验以大幅提速
-                do_run_wide_experiments=False,
-                data_loader_name=data_loader_name,
-            )
-            np.savez(cache_path, **result_object)
+            try:
+                result_object = dict(np.load(str(cache_path), allow_pickle=True))
+            except (OSError, ValueError, zipfile.BadZipFile) as e:
+                # Common after disk-full or killed mid-write: truncated npz / bad ZIP.
+                print(
+                    f"[Cache] Unreadable result cache (will delete and regenerate): "
+                    f"{cache_path}\n  ({type(e).__name__}: {e})"
+                )
+                try:
+                    cache_path.unlink()
+                except OSError:
+                    pass
+            else:
+                dataset = getattr(experiment_data, f"{data_loader_name}_data")
+                return result_object, dataset
+
+        data_to_use = (
+            override_data if override_data is not None else experiment_data
+        )
+        result_object, dataset = exp.test_adhoc_energy(
+            path_to_given_model,
+            experiment_data=data_to_use,
+            # 简化版统计不再依赖噪声采样结果，这里关闭宽泛噪声实验以大幅提速
+            do_run_wide_experiments=False,
+            data_loader_name=data_loader_name,
+        )
+        np.savez(cache_path, **result_object)
         return result_object, dataset
 
     train_cache_path = generate_cache_path(
