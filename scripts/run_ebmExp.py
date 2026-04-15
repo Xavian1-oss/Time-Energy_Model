@@ -160,17 +160,20 @@ def get_model_specific_configs(model_name):
             "ebm_model_name": "fedformer_mlp_concat",
             "version": "Fourier",
             "mode_select": "random",
-            "modes": 64
+            "modes": 64,
         }
     }
     
     
     return configs.get(model_name, {"ebm_model_name": "mlp_concat"})
 
-def get_dataset_specific_configs(data_path):
+def get_dataset_specific_configs(data_path, model_name=None):
     """
     Returns dataset-specific configurations based on the data_path.
     Also determines the 'data' parameter.
+
+    ``model_name`` is used only where a dataset+model pair needs a special case
+    (e.g. Traffic + FEDformer feed-forward width); pass ``user_args.model``.
     """
     
     config = {
@@ -203,6 +206,11 @@ def get_dataset_specific_configs(data_path):
         config["dec_in"] = 862
         # Use an even smaller batch size for high-dimensional traffic dataset
         config["batch_size"] = 1
+        # Default d_ff=32 is far too small for FEDformer when d_model=512; apply a
+        # larger FFN only for this pair so other backbones/datasets are unchanged.
+        # 1024 balances capacity vs VRAM; use --d_ff to override (e.g. 2048).
+        if model_name == "FEDformer":
+            config["d_ff"] = 1024
     elif data_path.startswith("weather"):
         config["data"] = "custom"
         config["enc_in"] = 21
@@ -335,6 +343,39 @@ def create_simplified_parser():
         help="Override auto-derived checkpoint id (default embeds dataset + model + seq_len).",
     )
 
+    # Optional backbone training overrides (defaults come from get_default_args /
+    # get_model_specific_configs / get_dataset_specific_configs).
+    parser.add_argument(
+        "--d_ff",
+        type=int,
+        default=None,
+        help="Feed-forward hidden size (FEDformer/Transformer blocks). Default: model-specific.",
+    )
+    parser.add_argument(
+        "--batch_size",
+        type=int,
+        default=None,
+        help="Training batch size. Overrides dataset-specific defaults (e.g. traffic uses 1).",
+    )
+    parser.add_argument(
+        "--train_epochs",
+        type=int,
+        default=None,
+        help="Backbone training epochs.",
+    )
+    parser.add_argument(
+        "--learning_rate",
+        type=float,
+        default=None,
+        help="Backbone optimizer learning rate.",
+    )
+    parser.add_argument(
+        "--patience",
+        type=int,
+        default=None,
+        help="Early stopping patience (epochs without val improvement).",
+    )
+
     return parser
 
 
@@ -349,7 +390,7 @@ model_configs = get_model_specific_configs(user_args.model)
 default_args.update(model_configs)
 
 
-dataset_configs = get_dataset_specific_configs(user_args.data_path)
+dataset_configs = get_dataset_specific_configs(user_args.data_path, user_args.model)
 default_args.update(dataset_configs)
 
 
