@@ -19,9 +19,12 @@
 #   ./scripts/run_tem_graph_joint_M.sh
 #   # 只跑训练 + 在线 Graph gate，不做离线 EBM/Graph/Fusion 汇总和画图：
 #   RUN_MODE=graph_only ./scripts/run_tem_graph_joint_M.sh
+#   # 只跑 FEDformer + traffic，并手动覆盖 d_ff（示例 521）：
+#   MODELS_OVERRIDE="FEDformer" DATA_PATHS_OVERRIDE="traffic.csv" \
+#     EXTRA_RUN_EBM_ARGS="--d_ff 521" ./scripts/run_tem_graph_joint_M.sh
 #
-# You can edit the MODELS / DATA_PATHS arrays below to match the
-# experiments you care about.
+# You can edit the MODELS / DATA_PATHS arrays below, or use MODELS_OVERRIDE /
+# DATA_PATHS_OVERRIDE (space-separated lists) without editing the file.
 
 set -e
 
@@ -42,7 +45,7 @@ RUN_MODE=${RUN_MODE:-all}
 export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0}
 
 # Models to evaluate
-MODELS=("PatchTST")
+MODELS=("FEDformer")
 
 # Data paths (CSV filenames under ./dataset)
 DATA_PATHS=(
@@ -56,6 +59,18 @@ DATA_PATHS=(
   # "electricity.csv"
   "traffic.csv"
 )
+
+if [ -n "${MODELS_OVERRIDE:-}" ]; then
+  read -r -a MODELS <<< "${MODELS_OVERRIDE}"
+fi
+if [ -n "${DATA_PATHS_OVERRIDE:-}" ]; then
+  read -r -a DATA_PATHS <<< "${DATA_PATHS_OVERRIDE}"
+fi
+
+extra_run_ebm_args=()
+if [ -n "${EXTRA_RUN_EBM_ARGS:-}" ]; then
+  read -r -a extra_run_ebm_args <<< "${EXTRA_RUN_EBM_ARGS}"
+fi
 
 OUT_ROOT="./all_runs_tem_graph_joint_M"
 mkdir -p "${OUT_ROOT}"
@@ -86,7 +101,8 @@ for model in "${MODELS[@]}"; do
         --output_parent_path "${out_dir}" \
         --is_test_mode 0 \
         --graph_mode auto \
-        --ebm_mode none
+        --ebm_mode none \
+        "${extra_run_ebm_args[@]}"
     else
       python scripts/run_ebmExp.py \
         --model "${model}" \
@@ -95,7 +111,8 @@ for model in "${MODELS[@]}"; do
         --inference_strategy noise \
         --output_parent_path "${out_dir}" \
         --is_test_mode 0 \
-        --graph_mode auto
+        --graph_mode auto \
+        "${extra_run_ebm_args[@]}"
     fi
   done
 done
