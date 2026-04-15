@@ -376,6 +376,16 @@ def create_simplified_parser():
         help="Early stopping patience (epochs without val improvement).",
     )
 
+    parser.add_argument(
+        "--per_split_coverage",
+        action="store_true",
+        help=(
+            "For noise-strategy selective inference: calibrate energy threshold on test "
+            "using test energies so empirical test coverage matches target_coverage "
+            "(default: single threshold from validation, as before)."
+        ),
+    )
+
     return parser
 
 
@@ -689,6 +699,7 @@ def run_analysis(
             is_different_project=False,
             is_test_mode=args.is_test_mode is not None and args.is_test_mode == 1,
             noisy_std_custom=args.noisy_std if hasattr(args, 'noisy_std') else None,
+            calibrate_threshold_on_split=getattr(args, "per_split_coverage", False),
         )
         
         if val_metrics_df is not None:

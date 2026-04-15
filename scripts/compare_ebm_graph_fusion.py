@@ -131,12 +131,16 @@ def _compute_method_metrics(
     mse_orig_val: np.ndarray,
     mse_sel_test: np.ndarray,
     mse_orig_test: np.ndarray,
+    calibrate_threshold_on_split: bool = False,
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """Simple energy-sorting selective inference for a given method.
 
     Returns (val_df, test_df) with columns:
         target_coverage, train_coverage, split_mse_selected,
         split_mse_orig, split, method
+
+    If ``calibrate_threshold_on_split`` is True, the test split uses thresholds
+    from test energies so empirical coverage on test matches ``target_coverage``.
     """
 
     def _to_1d(arr: np.ndarray) -> np.ndarray:
@@ -179,6 +183,7 @@ def _compute_method_metrics(
         split_mse_sel=test_mse_sel,
         split_mse_orig=test_mse_orig,
         target_coverages=COVERAGES,
+        calibrate_threshold_on_split=calibrate_threshold_on_split,
     )
 
     # 标记 method 字段，保持 compare_ebm_graph_fusion 的接口不变。
@@ -269,7 +274,9 @@ def _compute_graph_energies_chunked(
     return np.concatenate(energies, axis=0)
 
 
-def process_single_run(run_dir: Path) -> Tuple[pd.DataFrame, pd.DataFrame]:
+def process_single_run(
+    run_dir: Path, calibrate_threshold_on_split: bool = False
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """Process one experiment run directory under checkpoints.
 
     Expects:
@@ -335,6 +342,7 @@ def process_single_run(run_dir: Path) -> Tuple[pd.DataFrame, pd.DataFrame]:
         mse_orig_val=mse_orig_val,
         mse_sel_test=mse_sel_test,
         mse_orig_test=mse_orig_test,
+        calibrate_threshold_on_split=calibrate_threshold_on_split,
     )
 
     # If this run did not train an adaptive graph (e.g., TEM-only with
@@ -438,6 +446,7 @@ def process_single_run(run_dir: Path) -> Tuple[pd.DataFrame, pd.DataFrame]:
         mse_orig_val=mse_orig_val,
         mse_sel_test=mse_sel_test,
         mse_orig_test=mse_orig_test,
+        calibrate_threshold_on_split=calibrate_threshold_on_split,
     )
 
     val_fused, test_fused = _compute_method_metrics(
@@ -448,6 +457,7 @@ def process_single_run(run_dir: Path) -> Tuple[pd.DataFrame, pd.DataFrame]:
         mse_orig_val=mse_orig_val,
         mse_sel_test=mse_sel_test,
         mse_orig_test=mse_orig_test,
+        calibrate_threshold_on_split=calibrate_threshold_on_split,
     )
 
     # Record the chosen fusion alpha for analysis.
@@ -494,6 +504,14 @@ def main():
             "saved args.output_parent_path contains this substring."
         ),
     )
+    parser.add_argument(
+        "--per-split-coverage",
+        action="store_true",
+        help=(
+            "Calibrate the energy threshold on each split separately for test rows "
+            "(empirical test coverage matches target_coverage; default uses val threshold on test)."
+        ),
+    )
     cli = parser.parse_args()
 
     checkpoints_root = Path(cli.checkpoints_root)
@@ -521,7 +539,10 @@ def main():
     for run_dir in run_dirs:
         try:
             print(f"Processing run: {run_dir}")
-            val_df, test_df = process_single_run(run_dir)
+            val_df, test_df = process_single_run(
+                run_dir,
+                calibrate_threshold_on_split=cli.per_split_coverage,
+            )
             all_val.append(val_df)
             all_test.append(test_df)
         except Exception as e:
