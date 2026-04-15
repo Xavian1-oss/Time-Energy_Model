@@ -20,33 +20,78 @@ from utils.graph_energy_gate import compute_structure_energy
 
 COVERAGES = [0.5, 0.6, 0.7, 0.8, 0.9]
 
+_LEGACY_FUSION_ALPHAS = (0.0, 0.25, 0.5, 0.75, 1.0)
+
+
+def _empirical_cdf_from_val(val_reference: np.ndarray, x: np.ndarray) -> np.ndarray:
+    """Map scalar energies x to [0, 1] using the empirical CDF of val_reference."""
+    v = np.sort(np.asarray(val_reference, dtype=np.float64).ravel())
+    x = np.asarray(x, dtype=np.float64).ravel()
+    n = v.size
+    if n == 0:
+        return np.zeros_like(x, dtype=np.float64)
+    return np.searchsorted(v, x, side="right") / float(n)
+
+
+def _prepare_fusion_channels(
+    e_ebm_val: np.ndarray,
+    e_graph_val: np.ndarray,
+    e_ebm_test: np.ndarray,
+    e_graph_test: np.ndarray,
+    fusion_mode: str,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Return (ebm_val, graph_val, ebm_test, graph_test) in the space used for fusion.
+
+    * ``linear_z``: z-score each channel using val statistics (current default behaviour).
+    * ``rank_cdf``: map to empirical CDF under val (test points mapped through val's
+      distribution) so both signals live on [0, 1] before blending — no retraining.
+    """
+    e_ebm_val = np.asarray(e_ebm_val, dtype=np.float64)
+    e_graph_val = np.asarray(e_graph_val, dtype=np.float64)
+    e_ebm_test = np.asarray(e_ebm_test, dtype=np.float64)
+    e_graph_test = np.asarray(e_graph_test, dtype=np.float64)
+
+    if fusion_mode == "linear_z":
+        ez = (e_ebm_val - e_ebm_val.mean()) / (e_ebm_val.std() + 1e-8)
+        gz = (e_graph_val - e_graph_val.mean()) / (e_graph_val.std() + 1e-8)
+        ez_t = (e_ebm_test - e_ebm_val.mean()) / (e_ebm_val.std() + 1e-8)
+        gz_t = (e_graph_test - e_graph_val.mean()) / (e_graph_val.std() + 1e-8)
+        return ez, gz, ez_t, gz_t
+
+    if fusion_mode == "rank_cdf":
+        u_ebm_val = _empirical_cdf_from_val(e_ebm_val, e_ebm_val)
+        u_graph_val = _empirical_cdf_from_val(e_graph_val, e_graph_val)
+        u_ebm_test = _empirical_cdf_from_val(e_ebm_val, e_ebm_test)
+        u_graph_test = _empirical_cdf_from_val(e_graph_val, e_graph_test)
+        return u_ebm_val, u_graph_val, u_ebm_test, u_graph_test
+
+    raise ValueError(f"Unknown fusion_mode={fusion_mode!r}; use 'linear_z' or 'rank_cdf'.")
+
+
+def _fusion_alpha_candidates(fusion_alpha_step: Optional[float]) -> np.ndarray:
+    if fusion_alpha_step is None:
+        return np.array(_LEGACY_FUSION_ALPHAS, dtype=np.float64)
+    step = float(fusion_alpha_step)
+    if step <= 0 or step > 1:
+        raise ValueError("fusion_alpha_step must be in (0, 1].")
+    return np.arange(0.0, 1.0 + step * 0.5, step, dtype=np.float64)
+
 
 def _select_best_fusion_alpha(
-    e_ebm_val_z: np.ndarray,
-    e_graph_val_z: np.ndarray,
+    e_ebm_val_p: np.ndarray,
+    e_graph_val_p: np.ndarray,
     mse_sel_val: np.ndarray,
     mse_orig_val: np.ndarray,
-    candidate_alphas = (0.0, 0.25, 0.5, 0.75, 1.0),
+    candidate_alphas: np.ndarray,
+    interior_bias: float = 0.0,
 ) -> float:
-    """Select fusion weight alpha on the validation split.
+    """Select fusion weight alpha on the validation split (mean selective MSE objective)."""
 
-    For each candidate alpha, build fused validation energies
-    e_fused_val = alpha * e_ebm_val_z + (1 - alpha) * e_graph_val_z,
-    run the standard selective-inference procedure (only on val), and
-    use the average selected MSE across COVERAGES as the objective.
-
-    Returns the alpha that minimizes this objective.
-    """
-
-    best_alpha = candidate_alphas[0]
+    best_alpha = float(candidate_alphas[0])
     best_score = float("inf")
 
-    # We only care about validation performance here. To reuse the
-    # existing helper, we pass the same fused energies and MSEs as
-    # both "val" and "test" inputs; downstream, thresholds are still
-    # determined purely from the val energies.
     for alpha in candidate_alphas:
-        e_fused_val = alpha * e_ebm_val_z + (1.0 - alpha) * e_graph_val_z
+        e_fused_val = alpha * e_ebm_val_p + (1.0 - alpha) * e_graph_val_p
         val_df, _ = _compute_method_metrics(
             method="fusion_tmp",
             energies_val=e_fused_val,
@@ -61,11 +106,12 @@ def _select_best_fusion_alpha(
             continue
 
         score = float(val_df["split_mse_selected"].mean())
+        score += float(interior_bias) * (float(alpha) - 0.5) ** 2
         if score < best_score:
             best_score = score
-            best_alpha = alpha
+            best_alpha = float(alpha)
 
-    return float(best_alpha)
+    return best_alpha
 
 
 def _run_matches_output_parent_filter(
@@ -104,6 +150,37 @@ def _load_args(args_path: Path) -> SimpleNamespace:
         else:
             clean_dict[k] = v
     return SimpleNamespace(**clean_dict)
+
+
+def _dataset_name_from_args(args: SimpleNamespace) -> str:
+    """Same naming rule as ``process_single_run`` (ETT name vs custom CSV stem)."""
+    raw_dataset = getattr(args, "data", "unknown")
+    data_path_val = getattr(args, "data_path", None)
+    if raw_dataset == "custom" and data_path_val is not None:
+        return Path(str(data_path_val)).stem
+    return str(raw_dataset)
+
+
+def _run_matches_model_dataset_filters(
+    run_dir: Path,
+    only_model: Optional[str],
+    only_dataset: Optional[str],
+) -> bool:
+    """Lightweight filter before ``process_single_run`` (reads args.csv only)."""
+    if only_model is None and only_dataset is None:
+        return True
+    args_path = run_dir / "args.csv"
+    if not args_path.exists():
+        return False
+    try:
+        args = _load_args(args_path)
+    except Exception:
+        return False
+    if only_model is not None and getattr(args, "model", "") != only_model:
+        return False
+    if only_dataset is not None and _dataset_name_from_args(args) != only_dataset:
+        return False
+    return True
 
 
 def _find_result_objects_dir(run_dir: Path) -> Path:
@@ -275,7 +352,11 @@ def _compute_graph_energies_chunked(
 
 
 def process_single_run(
-    run_dir: Path, calibrate_threshold_on_split: bool = False
+    run_dir: Path,
+    calibrate_threshold_on_split: bool = False,
+    fusion_mode: str = "linear_z",
+    fusion_alpha_step: Optional[float] = None,
+    fusion_interior_bias: float = 0.0,
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """Process one experiment run directory under checkpoints.
 
@@ -324,14 +405,8 @@ def process_single_run(
     use_adaptive_graph = bool(getattr(args, "use_adaptive_graph", False))
     use_graph_for_analysis = (graph_mode != "none") and use_adaptive_graph
 
-    # Determine a human-readable dataset name once so it can be reused
-    # for both ETT-style and custom datasets.
-    raw_dataset = getattr(args, "data", "unknown")
-    data_path_val = getattr(args, "data_path", None)
-    if raw_dataset == "custom" and data_path_val is not None:
-        dataset_name = Path(str(data_path_val)).stem
-    else:
-        dataset_name = raw_dataset
+    # Human-readable dataset name (same rule as ``--only-dataset`` filter).
+    dataset_name = _dataset_name_from_args(args)
 
     # EBM-only metrics (always available).
     val_ebm, test_ebm = _compute_method_metrics(
@@ -419,23 +494,25 @@ def process_single_run(
         max_batch_size=max_batch_size,
     )
 
-    # Fusion energies: z-score on validation set, shared for test.
-    e_ebm_val_z = (e_ebm_val - e_ebm_val.mean()) / (e_ebm_val.std() + 1e-8)
-    e_graph_val_z = (e_graph_val - e_graph_val.mean()) / (e_graph_val.std() + 1e-8)
-
-    e_ebm_test_z = (e_ebm_test - e_ebm_val.mean()) / (e_ebm_val.std() + 1e-8)
-    e_graph_test_z = (e_graph_test - e_graph_val.mean()) / (e_graph_val.std() + 1e-8)
-
-    # Select per-run fusion weight on validation split.
-    best_alpha = _select_best_fusion_alpha(
-        e_ebm_val_z=e_ebm_val_z,
-        e_graph_val_z=e_graph_val_z,
-        mse_sel_val=mse_sel_val,
-        mse_orig_val=mse_orig_val,
+    # Fusion: blend EBM and graph in ``fusion_mode`` space, then pick alpha on val.
+    e_ebm_val_p, e_graph_val_p, e_ebm_test_p, e_graph_test_p = _prepare_fusion_channels(
+        e_ebm_val,
+        e_graph_val,
+        e_ebm_test,
+        e_graph_test,
+        fusion_mode,
     )
-
-    e_fused_val = best_alpha * e_ebm_val_z + (1.0 - best_alpha) * e_graph_val_z
-    e_fused_test = best_alpha * e_ebm_test_z + (1.0 - best_alpha) * e_graph_test_z
+    alphas = _fusion_alpha_candidates(fusion_alpha_step)
+    best_alpha = _select_best_fusion_alpha(
+        e_ebm_val_p,
+        e_graph_val_p,
+        mse_sel_val,
+        mse_orig_val,
+        candidate_alphas=alphas,
+        interior_bias=fusion_interior_bias,
+    )
+    e_fused_val = best_alpha * e_ebm_val_p + (1.0 - best_alpha) * e_graph_val_p
+    e_fused_test = best_alpha * e_ebm_test_p + (1.0 - best_alpha) * e_graph_test_p
 
     # Compute metrics for each method.
     val_graph, test_graph = _compute_method_metrics(
@@ -460,9 +537,11 @@ def process_single_run(
         calibrate_threshold_on_split=calibrate_threshold_on_split,
     )
 
-    # Record the chosen fusion alpha for analysis.
+    # Record fusion settings for analysis.
     val_fused["fusion_alpha"] = best_alpha
     test_fused["fusion_alpha"] = best_alpha
+    val_fused["fusion_mode"] = fusion_mode
+    test_fused["fusion_mode"] = fusion_mode
 
     # Annotate with experiment metadata.
     # 对于 ETT 系列，args.data 本身就是 ETTh1/ETTm1 等；
@@ -512,6 +591,62 @@ def main():
             "(empirical test coverage matches target_coverage; default uses val threshold on test)."
         ),
     )
+    parser.add_argument(
+        "--fusion-mode",
+        type=str,
+        default="linear_z",
+        choices=["linear_z", "rank_cdf"],
+        help=(
+            "Fusion channel alignment: linear_z (z-score each energy on val, default) or "
+            "rank_cdf (map to [0,1] via val empirical CDF before blending; no retraining)."
+        ),
+    )
+    parser.add_argument(
+        "--fusion-alpha-step",
+        type=float,
+        default=None,
+        metavar="STEP",
+        help=(
+            "Alpha grid step in [0,1], e.g. 0.05 for 21 values. "
+            "Omit for legacy grid {0, 0.25, 0.5, 0.75, 1}."
+        ),
+    )
+    parser.add_argument(
+        "--fusion-interior-bias",
+        type=float,
+        default=0.0,
+        help="Add lambda*(alpha-0.5)^2 to val fusion objective to favor mixed alphas when close.",
+    )
+    parser.add_argument(
+        "--only-model",
+        type=str,
+        default=None,
+        help=(
+            "If set (e.g. FEDformer), only process runs whose args.model matches exactly. "
+            "Output CSVs will contain only those runs (full overwrite, not merge)."
+        ),
+    )
+    parser.add_argument(
+        "--only-dataset",
+        type=str,
+        default=None,
+        help=(
+            "If set (e.g. traffic), only process runs whose dataset label matches: "
+            "for custom data, the CSV stem (traffic for traffic.csv); else args.data. "
+            "Output CSVs will contain only those runs."
+        ),
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=str,
+        default=None,
+        help=(
+            "If set, write all outputs under this directory (global CSVs and "
+            "ebm_graph_fusion_metrics/<model>/). Default is current directory, "
+            "which overwrites ebm_graph_fusion_*.csv — use --output-dir to "
+            "keep the original tables untouched."
+        ),
+    )
     cli = parser.parse_args()
 
     checkpoints_root = Path(cli.checkpoints_root)
@@ -532,9 +667,24 @@ def main():
     if filt:
         run_dirs = [p for p in run_dirs if _run_matches_output_parent_filter(p, filt)]
 
+    run_dirs = [
+        p
+        for p in run_dirs
+        if _run_matches_model_dataset_filters(p, cli.only_model, cli.only_dataset)
+    ]
+
     print(f"Found {len(run_dirs)} candidate runs with result_objects and args.csv")
     if filt:
         print(f"(filtered by output_parent_path containing {filt!r})")
+    if cli.only_model or cli.only_dataset:
+        print(
+            f"(filtered by only_model={cli.only_model!r}, only_dataset={cli.only_dataset!r}; "
+            "global CSVs will list only matching runs)"
+        )
+    out_base = Path(cli.output_dir) if cli.output_dir else Path(".")
+    if cli.output_dir:
+        out_base.mkdir(parents=True, exist_ok=True)
+        print(f"Writing outputs under {out_base.resolve()} (default files in CWD are not touched)")
 
     for run_dir in run_dirs:
         try:
@@ -542,6 +692,9 @@ def main():
             val_df, test_df = process_single_run(
                 run_dir,
                 calibrate_threshold_on_split=cli.per_split_coverage,
+                fusion_mode=cli.fusion_mode,
+                fusion_alpha_step=cli.fusion_alpha_step,
+                fusion_interior_bias=cli.fusion_interior_bias,
             )
             all_val.append(val_df)
             all_test.append(test_df)
@@ -555,19 +708,19 @@ def main():
     val_all = pd.concat(all_val, ignore_index=True)
     test_all = pd.concat(all_test, ignore_index=True)
 
-    # Global aggregated CSVs (backward-compatible).
-    out_val = Path("ebm_graph_fusion_val_metrics.csv")
-    out_test = Path("ebm_graph_fusion_test_metrics.csv")
+    # Global aggregated CSVs (backward-compatible paths when --output-dir is unset).
+    out_val = out_base / "ebm_graph_fusion_val_metrics.csv"
+    out_test = out_base / "ebm_graph_fusion_test_metrics.csv"
     val_all.to_csv(out_val, index=False)
     test_all.to_csv(out_test, index=False)
 
-    print(f"Saved aggregated validation metrics to {out_val}")
-    print(f"Saved aggregated test metrics to {out_test}")
+    print(f"Saved aggregated validation metrics to {out_val.resolve()}")
+    print(f"Saved aggregated test metrics to {out_test.resolve()}")
 
     # Additionally, store metrics grouped by backbone under
     # ebm_graph_fusion_metrics/<model>/... so that different
     # backbones' curves/results are cleanly separated.
-    metrics_root = Path("ebm_graph_fusion_metrics")
+    metrics_root = out_base / "ebm_graph_fusion_metrics"
     metrics_root.mkdir(parents=True, exist_ok=True)
 
     for split_name, df_split in ("val", val_all), ("test", test_all):
