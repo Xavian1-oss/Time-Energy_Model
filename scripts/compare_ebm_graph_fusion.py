@@ -382,7 +382,7 @@ def _selective_baseline_blocks(
     if include_error_predictor:
         ev, et = error_predictor_energies(
             y_hat_val,
-            np.asarray(mse_sel_val, dtype=np.float64).ravel(),
+            np.asarray(mse_sel_val, dtype=np.float64),
             y_hat_test,
             use_mlp=error_predictor_mlp,
         )

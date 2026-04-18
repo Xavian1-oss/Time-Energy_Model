@@ -32,6 +32,26 @@ def _flatten_y_hat(y: np.ndarray) -> np.ndarray:
     return y.reshape(y.shape[0], -1)
 
 
+def _per_sample_mse_for_error_head(mse: np.ndarray, n_samples: int) -> np.ndarray:
+    """Match ``compare_ebm_graph_fusion._compute_method_metrics._to_1d`` semantics.
+
+    Cached ``mse_init_orig_model`` may be ``[N]``, ``[N, D]``, or raveled ``[N * D]``
+    (per-channel / extra dims); we reduce to one scalar MSE per forecast window.
+    """
+    m = np.asarray(mse, dtype=np.float64)
+    if m.shape[0] == n_samples:
+        if m.ndim == 1:
+            return m.reshape(-1)
+        return m.mean(axis=tuple(range(1, m.ndim))).reshape(-1)
+    if m.size == n_samples:
+        return m.reshape(-1)
+    if m.size % n_samples != 0:
+        raise ValueError(
+            f"Cannot align mse shape {m.shape} (size {m.size}) with n_samples={n_samples}"
+        )
+    return m.reshape(n_samples, -1).mean(axis=1)
+
+
 def error_predictor_energies(
     y_hat_val: np.ndarray,
     mse_val: np.ndarray,
@@ -48,11 +68,7 @@ def error_predictor_energies(
     """
     X_val = _flatten_y_hat(y_hat_val)
     X_test = _flatten_y_hat(y_hat_test)
-    y_tr = np.asarray(mse_val, dtype=np.float64).ravel()
-    if y_tr.shape[0] != X_val.shape[0]:
-        raise ValueError(
-            f"mse_val length {y_tr.shape[0]} != y_hat_val rows {X_val.shape[0]}"
-        )
+    y_tr = _per_sample_mse_for_error_head(mse_val, X_val.shape[0])
 
     target = np.log1p(y_tr) if target_log1p else y_tr.copy()
 
