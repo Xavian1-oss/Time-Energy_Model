@@ -25,6 +25,16 @@ from run_commons import ExperimentConstants
 from utils.graph_energy_gate import AdaptiveEmbeddingGraphBuilder
 
 
+def _is_blank_or_nan(val: Any) -> bool:
+    if val is None:
+        return True
+    if isinstance(val, float) and not np.isfinite(val):
+        return True
+    if isinstance(val, str) and val.strip().lower() in ("", "none", "nan"):
+        return True
+    return False
+
+
 def _flatten_y_hat(y: np.ndarray) -> np.ndarray:
     y = np.asarray(y, dtype=np.float64)
     if y.ndim == 1:
@@ -148,9 +158,12 @@ def _sanitize_exp_args(ns: SimpleNamespace) -> SimpleNamespace:
 def setting_from_args(args: SimpleNamespace, itr_index: int = 0) -> str:
     """Rebuild training `setting` string (see scripts/run_ebmExp.py)."""
     data_path = str(getattr(args, "data_path", "")).replace(".", "_")
+    if _is_blank_or_nan(data_path) or data_path.lower() == "nan":
+        data_path = ""
     site_suffix = ""
-    if str(getattr(args, "site_id", "None")) != "None":
-        site_suffix = f"_{str(args.site_id).replace(',', '_')}"
+    sid = getattr(args, "site_id", "None")
+    if not _is_blank_or_nan(sid) and str(sid).strip() != "None":
+        site_suffix = f"_{str(sid).replace(',', '_')}"
     return (
         "{}_{}_{}_{}_{}_ft{}_sl{}_ll{}_pl{}_dm{}_nh{}_el{}_dl{}_df{}_fc{}_eb{}_dt{}_{}_{}".format(
             ExperimentConstants.SETTINGS_PREFIX,
@@ -177,11 +190,53 @@ def setting_from_args(args: SimpleNamespace, itr_index: int = 0) -> str:
     )
 
 
-def _model_checkpoint_path(args: SimpleNamespace, setting: str) -> str:
-    seed_postfix = (
+def _checkpoint_seed_postfix(args: SimpleNamespace) -> str:
+    return (
         f"_{args.ebm_seed}" if getattr(args, "ebm_seed", 42) not in (42, 2021) else ""
     )
-    return os.path.join(str(args.checkpoints), setting, f"checkpoint{seed_postfix}.pth")
+
+
+def _resolve_model_checkpoint(args: SimpleNamespace, setting: str) -> Optional[str]:
+    """Prefer checkpoint{{seed}}.pth, then checkpoint.pth, then any checkpoint*.pth."""
+    base = os.path.join(str(args.checkpoints), setting)
+    sp = _checkpoint_seed_postfix(args)
+    candidates = [
+        os.path.join(base, f"checkpoint{sp}.pth"),
+        os.path.join(base, "checkpoint.pth"),
+    ]
+    for p in candidates:
+        if os.path.isfile(p):
+            return p
+    if os.path.isdir(base):
+        matches = sorted(Path(base).glob("checkpoint*.pth"))
+        if matches:
+            return str(matches[0])
+    return None
+
+
+def _setting_from_run_dir_layout(run_dir: Path) -> Optional[str]:
+    """Infer setting folder from ``.../<setting>/neoebm_*/<run_id>`` (see run_ebmExp layout)."""
+    try:
+        p = run_dir.resolve()
+        parent = p.parent
+        if parent.name.startswith("neoebm"):
+            grand = parent.parent
+            if grand.name:
+                return str(grand.name)
+    except (OSError, ValueError):
+        pass
+    return None
+
+
+def _setting_candidates_for_mc(run_dir: Path, args: SimpleNamespace) -> List[str]:
+    out: List[str] = []
+    s0 = setting_from_args(args, itr_index=0)
+    if s0:
+        out.append(s0)
+    s1 = _setting_from_run_dir_layout(run_dir)
+    if s1 and s1 not in out:
+        out.append(s1)
+    return out
 
 
 def _build_backbone(args: SimpleNamespace) -> nn.Module:
@@ -293,6 +348,12 @@ def mc_dropout_energies_from_run_dir(
         raw = df.iloc[0].to_dict()
         clean: dict = {}
         for k, v in raw.items():
+            if pd.isna(v):
+                if k in ("site_id", "target_site_id"):
+                    clean[k] = "None"
+                else:
+                    clean[k] = v
+                continue
             if isinstance(v, np.bool_):
                 clean[k] = bool(v)
             elif isinstance(v, (np.integer,)):
@@ -301,6 +362,9 @@ def mc_dropout_energies_from_run_dir(
                 clean[k] = float(v)
             else:
                 clean[k] = v
+        for key in ("site_id", "target_site_id"):
+            if key in clean and _is_blank_or_nan(clean[key]):
+                clean[key] = "None"
         args = _sanitize_exp_args(SimpleNamespace(**clean))
     except Exception:
         return None
@@ -313,10 +377,18 @@ def mc_dropout_energies_from_run_dir(
     args.is_test_mode = 1
 
     try:
-        setting = setting_from_args(args, itr_index=0)
-        ckpt_path = _model_checkpoint_path(args, setting)
-        if not os.path.isfile(ckpt_path):
-            print(f"[MC-Dropout] Missing checkpoint: {ckpt_path}")
+        ckpt_path: Optional[str] = None
+        tried_settings: List[str] = []
+        for setting in _setting_candidates_for_mc(run_dir, args):
+            tried_settings.append(setting)
+            ckpt_path = _resolve_model_checkpoint(args, setting)
+            if ckpt_path:
+                break
+        if not ckpt_path:
+            print(
+                f"[MC-Dropout] No checkpoint under {args.checkpoints!r} for settings "
+                f"{tried_settings!r} (tried checkpoint*.pth)."
+            )
             return None
 
         model = _build_backbone(args)
