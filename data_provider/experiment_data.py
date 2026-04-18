@@ -56,6 +56,21 @@ class ExperimentData:
                 f"{val_flag}" if val_flag != "val" else "",
                 f"{test_flag}" if test_flag != "test" else "",
             ]
+            # Without this, the default id collapses to ``ExpData`` and the class-level
+            # cache returns the first dataset's loaders for all later ``args`` (e.g. ETTh
+            # loaders reused for ETTm), breaking MC-dropout length checks vs per-run npz.
+            _ds_sig = (
+                getattr(args, "data", None),
+                getattr(args, "data_path", None),
+                getattr(args, "root_path", None),
+                getattr(args, "seq_len", None),
+                getattr(args, "label_len", None),
+                getattr(args, "pred_len", None),
+                getattr(args, "features", None),
+                getattr(args, "batch_size", None),
+                getattr(args, "freq", None),
+            )
+            components.append(f"ds={hash_value(_ds_sig)}")
 
             if is_short:
                 components_to_be_shortened = []
