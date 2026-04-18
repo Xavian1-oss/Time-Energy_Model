@@ -205,6 +205,14 @@ def _find_result_npz(ro_dir: Path, split: str) -> Path:
     return matches[0]
 
 
+def _len_after_selective_to_1d(mse_or_energy: np.ndarray) -> int:
+    """Length of per-window scalars after the same reduction as ``_compute_method_metrics._to_1d``."""
+    arr = np.asarray(mse_or_energy)
+    if arr.ndim > 1:
+        arr = arr.mean(axis=tuple(range(1, arr.ndim)))
+    return int(arr.reshape(-1).shape[0])
+
+
 def _compute_method_metrics(
     method: str,
     energies_val: np.ndarray,
@@ -401,8 +409,10 @@ def _selective_baseline_blocks(
         mc = mc_dropout_energies_from_run_dir(run_dir, n_passes=mc_dropout_passes)
         if mc is not None:
             ev, et = mc
-            n_v = int(np.asarray(mse_sel_val).ravel().shape[0])
-            n_t = int(np.asarray(mse_sel_test).ravel().shape[0])
+            # Cached MSE may be [N, D] while MC energies are one per loader batch row (N).
+            # Do not use .ravel().size — that counts N*D and wrongly skips MC-dropout.
+            n_v = _len_after_selective_to_1d(mse_sel_val)
+            n_t = _len_after_selective_to_1d(mse_sel_test)
             if ev.shape[0] == n_v and et.shape[0] == n_t:
                 val_df, test_df = _compute_method_metrics(
                     method="mc_dropout",
