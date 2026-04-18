@@ -16,6 +16,10 @@ import pandas as pd
 import torch
 
 from utils.graph_energy_gate import compute_structure_energy
+from utils.selective_baselines import (
+    error_predictor_energies,
+    mc_dropout_energies_from_run_dir,
+)
 
 
 COVERAGES = [0.5, 0.6, 0.7, 0.8, 0.9]
@@ -100,6 +104,7 @@ def _select_best_fusion_alpha(
             mse_orig_val=mse_orig_val,
             mse_sel_test=mse_sel_val,
             mse_orig_test=mse_orig_val,
+            calibrate_threshold_on_split=False,
         )
 
         if val_df.empty:
@@ -208,7 +213,7 @@ def _compute_method_metrics(
     mse_orig_val: np.ndarray,
     mse_sel_test: np.ndarray,
     mse_orig_test: np.ndarray,
-    calibrate_threshold_on_split: bool = False,
+    calibrate_threshold_on_split: bool = True,
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """Simple energy-sorting selective inference for a given method.
 
@@ -216,8 +221,10 @@ def _compute_method_metrics(
         target_coverage, train_coverage, split_mse_selected,
         split_mse_orig, split, method
 
-    If ``calibrate_threshold_on_split`` is True, the test split uses thresholds
-    from test energies so empirical coverage on test matches ``target_coverage``.
+    If ``calibrate_threshold_on_split`` is True (default for compare script), test
+    rows use thresholds from **test** energies so empirical coverage on test
+    matches ``target_coverage``. If False, test uses the **val**-derived threshold
+    (legacy).
     """
 
     def _to_1d(arr: np.ndarray) -> np.ndarray:
@@ -351,12 +358,81 @@ def _compute_graph_energies_chunked(
     return np.concatenate(energies, axis=0)
 
 
+def _selective_baseline_blocks(
+    run_dir: Path,
+    calibrate_threshold_on_split: bool,
+    include_error_predictor: bool,
+    include_mc_dropout: bool,
+    mc_dropout_passes: int,
+    error_predictor_mlp: bool,
+    y_hat_val: np.ndarray,
+    y_hat_test: np.ndarray,
+    mse_sel_val: np.ndarray,
+    mse_orig_val: np.ndarray,
+    mse_sel_test: np.ndarray,
+    mse_orig_test: np.ndarray,
+) -> List[Tuple[pd.DataFrame, pd.DataFrame]]:
+    """Error-predictor and MC-dropout selective metrics.
+
+    Same ``calibrate_threshold_on_split`` as EBM/Graph/Fusion: when True (default),
+    **test** rows use test-set quantile thresholds; when False, test uses val-derived
+    thresholds (legacy).
+    """
+    blocks: List[Tuple[pd.DataFrame, pd.DataFrame]] = []
+    if include_error_predictor:
+        ev, et = error_predictor_energies(
+            y_hat_val,
+            np.asarray(mse_sel_val, dtype=np.float64).ravel(),
+            y_hat_test,
+            use_mlp=error_predictor_mlp,
+        )
+        val_df, test_df = _compute_method_metrics(
+            method="error_predictor",
+            energies_val=ev,
+            energies_test=et,
+            mse_sel_val=mse_sel_val,
+            mse_orig_val=mse_orig_val,
+            mse_sel_test=mse_sel_test,
+            mse_orig_test=mse_orig_test,
+            calibrate_threshold_on_split=calibrate_threshold_on_split,
+        )
+        blocks.append((val_df, test_df))
+    if include_mc_dropout:
+        mc = mc_dropout_energies_from_run_dir(run_dir, n_passes=mc_dropout_passes)
+        if mc is not None:
+            ev, et = mc
+            n_v = int(np.asarray(mse_sel_val).ravel().shape[0])
+            n_t = int(np.asarray(mse_sel_test).ravel().shape[0])
+            if ev.shape[0] == n_v and et.shape[0] == n_t:
+                val_df, test_df = _compute_method_metrics(
+                    method="mc_dropout",
+                    energies_val=ev,
+                    energies_test=et,
+                    mse_sel_val=mse_sel_val,
+                    mse_orig_val=mse_orig_val,
+                    mse_sel_test=mse_sel_test,
+                    mse_orig_test=mse_orig_test,
+                    calibrate_threshold_on_split=calibrate_threshold_on_split,
+                )
+                blocks.append((val_df, test_df))
+            else:
+                print(
+                    f"[MC-Dropout] Length mismatch vs cached npz "
+                    f"(val {ev.shape[0]}!={n_v} or test {et.shape[0]}!={n_t}); skip."
+                )
+    return blocks
+
+
 def process_single_run(
     run_dir: Path,
-    calibrate_threshold_on_split: bool = False,
+    calibrate_threshold_on_split: bool = True,
     fusion_mode: str = "linear_z",
     fusion_alpha_step: Optional[float] = None,
     fusion_interior_bias: float = 0.0,
+    include_error_predictor: bool = False,
+    include_mc_dropout: bool = False,
+    mc_dropout_passes: int = 20,
+    error_predictor_mlp: bool = False,
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """Process one experiment run directory under checkpoints.
 
@@ -398,6 +474,9 @@ def process_single_run(
     mse_sel_test = np.asarray(test_obj["mse_init_orig_model"])
     mse_orig_test = np.asarray(test_obj["mse_orig"])
 
+    y_hat_val = np.asarray(val_obj["y_hats_init_orig_model"]).astype(np.float32)
+    y_hat_test = np.asarray(test_obj["y_hats_init_orig_model"]).astype(np.float32)
+
     # Decide whether to include graph-based analysis for this run.
     # Only construct graph_only / fusion curves when the run was
     # actually configured to use an adaptive graph during training.
@@ -425,21 +504,35 @@ def process_single_run(
     # curves. This keeps graph-based analysis restricted to runs that
     # actually used a learned graph during training.
     if not use_graph_for_analysis:
-        # Reuse the dataset_name logic above for consistency.
         dataset = dataset_name
-
         experiment = run_dir.name
-        for df in (val_ebm, test_ebm):
+        val_parts: List[pd.DataFrame] = [val_ebm]
+        test_parts: List[pd.DataFrame] = [test_ebm]
+        for val_b, test_b in _selective_baseline_blocks(
+            run_dir,
+            calibrate_threshold_on_split,
+            include_error_predictor,
+            include_mc_dropout,
+            mc_dropout_passes,
+            error_predictor_mlp,
+            y_hat_val,
+            y_hat_test,
+            mse_sel_val,
+            mse_orig_val,
+            mse_sel_test,
+            mse_orig_test,
+        ):
+            val_parts.append(val_b)
+            test_parts.append(test_b)
+        val_all = pd.concat(val_parts, ignore_index=True)
+        test_all = pd.concat(test_parts, ignore_index=True)
+        for df in (val_all, test_all):
             df["experiment"] = experiment
             df["dataset"] = dataset
             df["model"] = model_name
-
-        return val_ebm, test_ebm
+        return val_all, test_all
 
     # Graph-structural energies from forecasts and adjacency.
-    y_hat_val = np.asarray(val_obj["y_hats_init_orig_model"]).astype(np.float32)
-    y_hat_test = np.asarray(test_obj["y_hats_init_orig_model"]).astype(np.float32)
-
     D = y_hat_val.shape[-1]
 
     # Prefer using the learned adjacency matrix saved during training
@@ -551,21 +644,41 @@ def process_single_run(
     dataset = dataset_name
 
     experiment = run_dir.name
-    for df in (val_ebm, test_ebm, val_graph, test_graph, val_fused, test_fused):
+    val_parts = [val_ebm, val_graph, val_fused]
+    test_parts = [test_ebm, test_graph, test_fused]
+    for val_b, test_b in _selective_baseline_blocks(
+        run_dir,
+        calibrate_threshold_on_split,
+        include_error_predictor,
+        include_mc_dropout,
+        mc_dropout_passes,
+        error_predictor_mlp,
+        y_hat_val,
+        y_hat_test,
+        mse_sel_val,
+        mse_orig_val,
+        mse_sel_test,
+        mse_orig_test,
+    ):
+        val_parts.append(val_b)
+        test_parts.append(test_b)
+
+    val_all = pd.concat(val_parts, ignore_index=True)
+    test_all = pd.concat(test_parts, ignore_index=True)
+    for df in (val_all, test_all):
         df["experiment"] = experiment
         df["dataset"] = dataset
         df["model"] = model_name
-
-    val_all = pd.concat([val_ebm, val_graph, val_fused], ignore_index=True)
-    test_all = pd.concat([test_ebm, test_graph, test_fused], ignore_index=True)
     return val_all, test_all
 
 
 def main():
     parser = argparse.ArgumentParser(
         description=(
-            "Aggregate selective-inference metrics (EBM-only, graph-only, fusion) "
-            "from completed runs under a checkpoints tree."
+            "Aggregate selective-inference metrics (EBM, graph, fusion, optional baselines) "
+            "from completed runs under a checkpoints tree. By default, **test** rows use "
+            "**test**-set quantile thresholds (empirical test coverage matches target). "
+            "The legacy flag --per-split-coverage is a no-op (kept for old scripts)."
         )
     )
     parser.add_argument(
@@ -586,9 +699,15 @@ def main():
     parser.add_argument(
         "--per-split-coverage",
         action="store_true",
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--no-per-split-coverage",
+        action="store_true",
         help=(
-            "Calibrate the energy threshold on each split separately for test rows "
-            "(empirical test coverage matches target_coverage; default uses val threshold on test)."
+            "Legacy: **test** rows use a single threshold from **val** energies (coverage on test may "
+            "differ from target). Default: **test** quantile thresholds on **test** for all methods "
+            "including baselines."
         ),
     )
     parser.add_argument(
@@ -647,6 +766,33 @@ def main():
             "keep the original tables untouched."
         ),
     )
+    parser.add_argument(
+        "--include-error-predictor",
+        action="store_true",
+        help=(
+            "Add selective baseline: Ridge/MLP on val to predict per-sample MSE from "
+            "flattened y_hat. Test selective protocol matches EBM/Graph (default: test quantiles on test)."
+        ),
+    )
+    parser.add_argument(
+        "--error-predictor-mlp",
+        action="store_true",
+        help="Use a small MLP instead of Ridge for the error predictor (slower).",
+    )
+    parser.add_argument(
+        "--include-mc-dropout",
+        action="store_true",
+        help=(
+            "Add MC-dropout baseline (checkpoint under args.checkpoints/<setting>/; slow, GPU recommended). "
+            "Same test selective protocol as EBM/Graph by default."
+        ),
+    )
+    parser.add_argument(
+        "--mc-dropout-passes",
+        type=int,
+        default=20,
+        help="Stochastic forward passes per batch for MC dropout (default: 20).",
+    )
     cli = parser.parse_args()
 
     checkpoints_root = Path(cli.checkpoints_root)
@@ -691,10 +837,14 @@ def main():
             print(f"Processing run: {run_dir}")
             val_df, test_df = process_single_run(
                 run_dir,
-                calibrate_threshold_on_split=cli.per_split_coverage,
+                calibrate_threshold_on_split=not cli.no_per_split_coverage,
                 fusion_mode=cli.fusion_mode,
                 fusion_alpha_step=cli.fusion_alpha_step,
                 fusion_interior_bias=cli.fusion_interior_bias,
+                include_error_predictor=cli.include_error_predictor,
+                include_mc_dropout=cli.include_mc_dropout,
+                mc_dropout_passes=cli.mc_dropout_passes,
+                error_predictor_mlp=cli.error_predictor_mlp,
             )
             all_val.append(val_df)
             all_test.append(test_df)
