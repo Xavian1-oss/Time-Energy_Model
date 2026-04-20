@@ -205,6 +205,15 @@ def _find_result_npz(ro_dir: Path, split: str) -> Path:
     return matches[0]
 
 
+def _find_result_npz_optional(ro_dir: Path, split: str) -> Optional[Path]:
+    """Like ``_find_result_npz`` but return None if no cache (e.g. train not saved)."""
+    pattern = f"result_obj_*_{split}_*.npz"
+    matches = list(ro_dir.glob(pattern))
+    if not matches:
+        return None
+    return matches[0]
+
+
 def _len_after_selective_to_1d(mse_or_energy: np.ndarray) -> int:
     """Length of per-window scalars after the same reduction as ``_compute_method_metrics._to_1d``."""
     arr = np.asarray(mse_or_energy)
@@ -373,8 +382,11 @@ def _selective_baseline_blocks(
     include_mc_dropout: bool,
     mc_dropout_passes: int,
     error_predictor_mlp: bool,
+    error_predictor_fit_on: str,
     y_hat_val: np.ndarray,
     y_hat_test: np.ndarray,
+    y_hat_train: Optional[np.ndarray],
+    mse_sel_train: Optional[np.ndarray],
     mse_sel_val: np.ndarray,
     mse_orig_val: np.ndarray,
     mse_sel_test: np.ndarray,
@@ -388,14 +400,27 @@ def _selective_baseline_blocks(
     """
     blocks: List[Tuple[pd.DataFrame, pd.DataFrame]] = []
     if include_error_predictor:
+        ep_method = "error_predictor"
+        ep_kw = {}
+        if error_predictor_fit_on == "train":
+            if y_hat_train is not None and mse_sel_train is not None:
+                ep_kw["y_hat_fit"] = y_hat_train
+                ep_kw["mse_fit"] = np.asarray(mse_sel_train, dtype=np.float64)
+                ep_method = "error_predictor_trainfit"
+            else:
+                print(
+                    "[Error-predictor] --error-predictor-fit-on train but no "
+                    "result_obj_*_train_*.npz under result_objects/; fitting on val."
+                )
         ev, et = error_predictor_energies(
             y_hat_val,
             np.asarray(mse_sel_val, dtype=np.float64),
             y_hat_test,
             use_mlp=error_predictor_mlp,
+            **ep_kw,
         )
         val_df, test_df = _compute_method_metrics(
-            method="error_predictor",
+            method=ep_method,
             energies_val=ev,
             energies_test=et,
             mse_sel_val=mse_sel_val,
@@ -443,6 +468,7 @@ def process_single_run(
     include_mc_dropout: bool = False,
     mc_dropout_passes: int = 20,
     error_predictor_mlp: bool = False,
+    error_predictor_fit_on: str = "train",
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """Process one experiment run directory under checkpoints.
 
@@ -469,9 +495,16 @@ def process_single_run(
     ro_dir = _find_result_objects_dir(run_dir)
     val_npz_path = _find_result_npz(ro_dir, "val")
     test_npz_path = _find_result_npz(ro_dir, "test")
+    train_npz_path = _find_result_npz_optional(ro_dir, "train")
 
     val_obj = dict(np.load(str(val_npz_path), allow_pickle=True))
     test_obj = dict(np.load(str(test_npz_path), allow_pickle=True))
+    y_hat_train: Optional[np.ndarray] = None
+    mse_sel_train: Optional[np.ndarray] = None
+    if train_npz_path is not None:
+        train_obj = dict(np.load(str(train_npz_path), allow_pickle=True))
+        y_hat_train = np.asarray(train_obj["y_hats_init_orig_model"]).astype(np.float32)
+        mse_sel_train = np.asarray(train_obj["mse_init_orig_model"])
 
     device = torch.device("cpu")
 
@@ -525,8 +558,11 @@ def process_single_run(
             include_mc_dropout,
             mc_dropout_passes,
             error_predictor_mlp,
+            error_predictor_fit_on,
             y_hat_val,
             y_hat_test,
+            y_hat_train,
+            mse_sel_train,
             mse_sel_val,
             mse_orig_val,
             mse_sel_test,
@@ -663,8 +699,11 @@ def process_single_run(
         include_mc_dropout,
         mc_dropout_passes,
         error_predictor_mlp,
+        error_predictor_fit_on,
         y_hat_val,
         y_hat_test,
+        y_hat_train,
+        mse_sel_train,
         mse_sel_val,
         mse_orig_val,
         mse_sel_test,
@@ -780,14 +819,25 @@ def main():
         "--include-error-predictor",
         action="store_true",
         help=(
-            "Add selective baseline: Ridge/MLP on val to predict per-sample MSE from "
-            "flattened y_hat. Test selective protocol matches EBM/Graph (default: test quantiles on test)."
+            "Add selective baseline: Ridge/MLP to predict per-sample MSE from flattened y_hat. "
+            "Fit split is chosen by --error-predictor-fit-on (default train). "
+            "Requires result_obj_*_<split>_*.npz under result_objects/ (train cache from full TEM pipeline)."
         ),
     )
     parser.add_argument(
         "--error-predictor-mlp",
         action="store_true",
         help="Use a small MLP instead of Ridge for the error predictor (slower).",
+    )
+    parser.add_argument(
+        "--error-predictor-fit-on",
+        type=str,
+        default="train",
+        choices=["val", "train"],
+        help=(
+            "Where to fit the error predictor: train (default; no val labels for the head; "
+            "needs result_obj_*_train_*.npz, else falls back to val) or val (legacy / replication)."
+        ),
     )
     parser.add_argument(
         "--include-mc-dropout",
@@ -855,6 +905,7 @@ def main():
                 include_mc_dropout=cli.include_mc_dropout,
                 mc_dropout_passes=cli.mc_dropout_passes,
                 error_predictor_mlp=cli.error_predictor_mlp,
+                error_predictor_fit_on=cli.error_predictor_fit_on,
             )
             all_val.append(val_df)
             all_test.append(test_df)

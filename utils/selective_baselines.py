@@ -67,18 +67,31 @@ def error_predictor_energies(
     mse_val: np.ndarray,
     y_hat_test: np.ndarray,
     *,
+    y_hat_fit: Optional[np.ndarray] = None,
+    mse_fit: Optional[np.ndarray] = None,
     use_mlp: bool = False,
     target_log1p: bool = True,
     random_state: int = 0,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """Predict per-sample MSE from forecast tensor; use prediction as abstention energy.
 
-    Trained on validation only; scores on val and test. Lower predicted error =>
-    more confident (aligned with low-energy = selective kept first).
+    By default fits on **validation** (``y_hat_val``, ``mse_val``). If ``y_hat_fit`` and
+    ``mse_fit`` are set, fits on that split instead (e.g. train cache) and still scores
+    val and test. Lower predicted error => more confident (low-energy kept first).
     """
     X_val = _flatten_y_hat(y_hat_val)
     X_test = _flatten_y_hat(y_hat_test)
-    y_tr = _per_sample_mse_for_error_head(mse_val, X_val.shape[0])
+
+    if y_hat_fit is not None and mse_fit is not None:
+        X_fit = _flatten_y_hat(y_hat_fit)
+        y_tr = _per_sample_mse_for_error_head(
+            np.asarray(mse_fit, dtype=np.float64), X_fit.shape[0]
+        )
+    else:
+        X_fit = X_val
+        y_tr = _per_sample_mse_for_error_head(
+            np.asarray(mse_val, dtype=np.float64), X_val.shape[0]
+        )
 
     target = np.log1p(y_tr) if target_log1p else y_tr.copy()
 
@@ -106,7 +119,7 @@ def error_predictor_energies(
             ]
         )
 
-    reg.fit(X_val, target)
+    reg.fit(X_fit, target)
     pred_val = reg.predict(X_val).astype(np.float64)
     pred_test = reg.predict(X_test).astype(np.float64)
     return pred_val.ravel(), pred_test.ravel()
