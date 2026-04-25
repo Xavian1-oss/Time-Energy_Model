@@ -1,9 +1,16 @@
 #!/usr/bin/env python3
 """Run ``compare_ebm_graph_fusion.py`` on a small fixed grid of models × datasets.
 
-Default grid (edit ``MODELS`` / ``DATASETS`` in this file if needed):
-  - Models: PatchTST, Autoformer
-  - Datasets: ETTh2, electricity, weather
+Default grid is defined by ``MODELS`` / ``DATASETS`` at the top of this file, or
+override on the CLI without editing::
+
+  python scripts/run_baseline_compare_grid.py --checkpoints-root ./checkpoints \\
+    --models "PatchTST,Autoformer,FEDformer" \\
+    --datasets "ETTh2,ETTm1,electricity,weather"
+
+``--only-model`` / ``--only-dataset`` in ``compare_ebm_graph_fusion.py`` must match
+``args.model`` and the dataset label in each run's ``args.csv`` (ETT name or custom
+CSV stem).
 
 Each (model, dataset) pair is processed in isolation (matching compare's single-filter
 CLI), then validation/test CSVs are concatenated under ``--merged-output-dir``.
@@ -55,6 +62,11 @@ COMPARE_DEFAULT_EXTRA: list[str] = [
 ]
 
 
+def _parse_comma_list(s: str) -> list[str]:
+    """Split comma-separated tokens; strip whitespace; drop empties."""
+    return [p.strip() for p in s.split(",") if p.strip()]
+
+
 def _run_one_combo(
     *,
     python: str,
@@ -85,8 +97,8 @@ def _run_one_combo(
 def main() -> None:
     parser = argparse.ArgumentParser(
         description=(
-            "Batch-call compare_ebm_graph_fusion for PatchTST/Autoformer × "
-            "ETTh2/electricity/weather and merge CSVs."
+            "Batch-call compare_ebm_graph_fusion over a model × dataset grid and merge CSVs. "
+            "Defaults: MODELS × DATASETS in this file; override with --models / --datasets."
         )
     )
     parser.add_argument(
@@ -114,11 +126,37 @@ def main() -> None:
         action="store_true",
         help="After the grid finishes, run python run_and_pause.py from repo root.",
     )
+    parser.add_argument(
+        "--models",
+        type=str,
+        default=None,
+        metavar="LIST",
+        help=(
+            "Comma-separated backbone names (must match args.model in runs), e.g. "
+            '"PatchTST,Autoformer,FEDformer". Default: built-in MODELS in this file.'
+        ),
+    )
+    parser.add_argument(
+        "--datasets",
+        type=str,
+        default=None,
+        metavar="LIST",
+        help=(
+            "Comma-separated dataset labels (must match compare --only-dataset / "
+            'args.csv), e.g. "ETTh2,ETTm1,electricity". Default: built-in DATASETS.'
+        ),
+    )
     cli, extra = parser.parse_known_args()
 
     checkpoints_root = Path(cli.checkpoints_root).expanduser().resolve()
     merged_root = Path(cli.merged_output_dir).expanduser().resolve()
     merged_root.mkdir(parents=True, exist_ok=True)
+
+    models = _parse_comma_list(cli.models) if cli.models else list(MODELS)
+    datasets = _parse_comma_list(cli.datasets) if cli.datasets else list(DATASETS)
+    if not models or not datasets:
+        print("ERROR: --models and --datasets must each expand to a non-empty list.", file=sys.stderr)
+        sys.exit(2)
 
     python = sys.executable
     compare_tail = list(extra)
@@ -129,8 +167,12 @@ def main() -> None:
     val_parts: list[pd.DataFrame] = []
     test_parts: list[pd.DataFrame] = []
 
-    for model in MODELS:
-        for dataset in DATASETS:
+    print(
+        f"Grid: {len(models)} models × {len(datasets)} datasets = {len(models) * len(datasets)} compare runs.",
+        flush=True,
+    )
+    for model in models:
+        for dataset in datasets:
             safe = f"{model}_{dataset}".replace("/", "_")
             combo_out = merged_root / f"combo_{safe}"
             code = _run_one_combo(
