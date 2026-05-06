@@ -1,159 +1,152 @@
-# Time-Energy Model (TEM) reference implementation
+# Time–Energy Model (NeoEBM / TEM)
 
-This README explains how to use the simplified version of the Time-Energy Model (TEM) selective time series forecasting framework.
-Last updated: 2025-02-28
+Time-series forecasting experiments with **long-horizon backbones** (Autoformer, FEDformer, Informer, PatchTST, TimesNet), an optional **energy-based model (EBM)** on top of the backbone, **test-time energy / optimisation (TEM)**, learned **graph-structural energies** on multivariate tasks, and offline **fusion / baseline** comparisons (error predictor, MC dropout).
 
-## Overview
+---
 
-The TEM framework has been refactored to simplify usage by hardcoding most parameters while exposing only the most important ones for customization. This makes it easier to run experiments without having to specify dozens of parameters.
+## Features
 
-## Scripts (experiment drivers)
+- **Backbone training** with optional **adaptive graph** regularisation (`use_adaptive_graph`, multivariate `M`).
+- **EBM training** (contrastive-style energy on `xy_decoder`, optional staged `y_encoder`).
+- **`run_ebmExp.py`**: end-to-end training, checkpointing, TEM inference, graph-gate evaluation, `learned_graph_A.npy`, and NPZ **`result_objects/`** for later analysis.
+- **`scripts/compare_ebm_graph_fusion.py`**: scan `checkpoints/…` for completed runs; compute selective metrics (EBM-only, graph-only, fusion, optional baselines).
+- **Warm-start**: if backbone checkpoint (and EBM artefact when `ebm_mode=auto`) already exist, training can be skipped and weights reloaded (see below).
 
-Experiment and batch utilities live under [`scripts/`](scripts/):
+---
 
-| Path | Role |
-|------|------|
-| [`scripts/run_ebmExp.py`](scripts/run_ebmExp.py) | Main training and evaluation entry (the repo root [`run_ebmExp.py`](run_ebmExp.py) forwards to this file for backward compatibility). |
-| [`scripts/run_tem_graph_joint_M.sh`](scripts/run_tem_graph_joint_M.sh) | Batch runs for multivariate (`M`) TEM + graph + optional fusion; run from repo root: `./scripts/run_tem_graph_joint_M.sh`. |
-| [`scripts/compare_ebm_graph_fusion.py`](scripts/compare_ebm_graph_fusion.py) | Offline aggregation of EBM-only / graph-only / fusion selective metrics. |
-| [`scripts/graph_only_selective_analysis.py`](scripts/graph_only_selective_analysis.py) | Aggregate graph-only gate metrics and plot coverage–MSE curves. |
-| [`scripts/plot_ebm_graph_fusion_curves.py`](scripts/plot_ebm_graph_fusion_curves.py) | Plot curves from `ebm_graph_fusion_test_metrics.csv`. |
-| [`scripts/summarize_mse_changes.py`](scripts/summarize_mse_changes.py) | Scan `checkpoints/` for `*_metrics_filtered.csv` and summarize MSE deltas. |
-| [`scripts/export_graph_only_latex.py`](scripts/export_graph_only_latex.py) | Regenerate [`docs/experiments_graph_only_tables.tex`](docs/experiments_graph_only_tables.tex) from `graph_only_*_metrics.csv`. |
+## Requirements
 
-## Required setup
-
-1. Make sure to have the required packages installed as defined in the requirements.txt file 
-2. Download the dataset files and place them in the `./dataset` folder
- - Access to the datasets can be found in the README here https://github.com/thuml/Time-Series-Library?tab=readme-ov-file
- - Make sure to extract the dataset files and place .csv files in the `./dataset` folder (not the .zip files or folders)
-
-## Required Parameters
-
-When running `run_ebmExp.py` (or `python scripts/run_ebmExp.py`), you only need to specify the following parameters:
-
-1. `--model`: The forecasting model architecture to use
-   - Options: `TimesNet`, `Autoformer`, `Informer`, `FEDformer`, `PatchTST`
-
-2. `--data_path`: The dataset file to use
-   - Examples: `weather.csv`, `exchange_rate.csv`, `ETTh1.csv`, `ETTh2.csv`, `national_illness.csv`
-   - The script will automatically determine the appropriate dataset type and configurations
-
-3. `--features`: The type of forecasting task
-   - `S`: Univariate forecasting (single variable input, single variable output)
-   - `MS`: Multivariate to univariate forecasting (multiple variable input, single variable output)
-
-4. `--output_parent_path`: Directory where experiment results will be saved
-
-## Optional Parameters
-
-5. `--inference_strategy`: The inference method to use for selective inference
-   - `noise` (default): Uses Aggregated Energy inference
-   - `optim`: Uses Energy Optimization inference
-
-6. For Aggregated Energy inference:
-   - `--noisy_std`: Standard deviation for noise (default: 0.1)
-
-7. For Energy Optimization inference:
-   - `--inference_steps`: Number of optimization steps (default: 25)
-   - `--inference_optim_lr`: Learning rate for optimization (default: 0.01)
-
-8. `--is_test_mode`: Enable test mode
-   - `1` (default): Runs with fewer iterations for faster testing
-   - `0`: Runs full experiments
-
-## Example Usage
-
-### Basic usage with noise-based inference (default):
+- **Python 3** (3.9+ recommended).
+- **PyTorch** with CUDA if you use `--use_gpu` (install from [pytorch.org](https://pytorch.org) to match your platform).
+- Other Python deps:
 
 ```bash
-python run_ebmExp.py \
-  --model TimesNet \
-  --data_path exchange_rate.csv \
-  --features S \
-  --output_parent_path ./output_results
+pip install -r requirements.txt
 ```
 
-### Using optimization-based inference:
+`requirements.txt` lists libraries such as `numpy`, `pandas`, `scikit-learn`, `matplotlib`, `clearml`, etc. It does **not** pin a specific `torch` build; install PyTorch separately.
+
+---
+
+## Data
+
+Place datasets under `dataset/` (default `root_path` is `./dataset`).  
+Examples: `ETTh1.csv`, `traffic.csv`, `electricity.csv`, `weather.csv`, …
+
+`scripts/run_ebmExp.py` maps `--data_path` prefixes to `args.data` and channel counts (e.g. ETT names, traffic/electricity/weather dimensions).
+
+---
+
+## Quick start (training + analysis)
+
+Run from the **repository root** so imports resolve.
+
+### Minimal experiment
 
 ```bash
-python run_ebmExp.py \
-  --model Autoformer \
-  --data_path ETTh1.csv \
-  --features MS \
-  --inference_strategy optim \
-  --inference_steps 50 \
-  --inference_optim_lr 0.005 \
-  --output_parent_path ./output_results
-```
-
-### Custom noise standard deviation:
-
-```bash
-python run_ebmExp.py \
+python scripts/run_ebmExp.py \
   --model PatchTST \
-  --data_path ETTh1.csv \
-  --features MS \
-  --inference_strategy noise \
-  --noisy_std 0.2 \
-  --output_parent_path ./output_results
+  --data_path ETTh2.csv \
+  --features M \
+  --output_parent_path ./exports/my_run
 ```
 
-## Default Values
+Important CLI flags:
 
-Most parameters are hardcoded with sensible defaults. The key defaults include:
+| Flag | Role |
+|------|------|
+| `--model` | `TimesNet`, `Autoformer`, `Informer`, `FEDformer`, `PatchTST` |
+| `--data_path` | CSV name under `dataset/` |
+| `--features` | `S` / `MS` / `M` (multivariate all channels = `M`) |
+| `--output_parent_path` | Root folder for checkpoints / logs (`args.output_parent_path`) |
+| `--graph_mode` | `auto` (default): graph on multivariate tasks; `none`: TEM/EBM only path for graph-off |
+| `--ebm_mode` | `auto` (default): train EBM + TEM; `none`: graph-only backbone path, skip EBM |
+| `--is_test_mode` | `1` uses fewer epochs/iterations for smoke tests |
 
-### General Parameters
-- Sequence length: 96 
-- Prediction length: 48 
-- Batch size: 8 (except for TimesNet which uses 64)
-- Training epochs: 30 
-- Learning rate: 0.001 
+Many hyperparameters (`train_epochs`, `batch_size`, `ebm_epochs`, GPU, checkpoints dir, …) live in `get_default_args()` and dataset/model helpers inside `scripts/run_ebmExp.py`.
 
-### EBM Parameters
-- EBM training epochs: 30
-- EBM predictor size: 96
-- EBM decoder size: 96
-- EBM seed: 2024
+### Checkpoints and warm-start
 
-### Other Parameters
-- d_model: 512 (except for TimesNet which uses 16)
-- n_heads: 8
-- e_layers: 2
-- d_layers: 1
-- d_ff: 32 
-- dropout: 0.05
+- Checkpoints live under `./checkpoints/<setting>/…` plus EBM paths derived from `get_full_ebm_path`, etc.
+- If **`checkpoint*.pth`** exists for the resolved `setting`, and (**`ebm_mode=none`** *or* **`full_ebm.pth`** exists when training EBM), and you did **not** set `force_retrain_orig_model` / `force_retrain_y_enc` / `force_retrain_xy_dec`, the script prints **`[WarmStart]`**, loads the backbone, and **skips** `train()` / `train_energy()`.
+- To force a full retrain, use the `force_retrain_*` flags or remove the relevant files.
 
-For a complete list of default values, refer to the `get_default_args()` function in [`scripts/run_ebmExp.py`](scripts/run_ebmExp.py).
+---
 
-## Model-Specific Configurations
+## Offline comparison (`compare_ebm_graph_fusion`)
 
-Each model has specific configurations that are automatically applied when you select the model:
+Aggregates selective-inference curves from runs that contain **`args.csv`** and **`result_objects/`** (NPZ caches from the TEM pipeline).
 
-### TimesNet
-- batch_size: 64 (overrides default of 8)
-- d_model: 16 (overrides default of 512)
+```bash
+python scripts/compare_ebm_graph_fusion.py \
+  --checkpoints-root ./checkpoints \
+  --only-model FEDformer \
+  --only-dataset traffic \
+  --output-dir ./exports/compare_out
+```
 
-## Dataset-Specific Configurations
+- **Default**: test-split metrics use thresholds from **test** energies so empirical coverage matches targets.
+- **`--no-per-split-coverage`**: use **validation** thresholds on **test** (legacy / transductive calibration style).
 
-The script automatically detects the dataset type from the data path and applies appropriate configurations:
+Optional baselines:
 
-### ETT Datasets (ETTh1, ETTh2)
-- data: Set to the corresponding ETT dataset name
-- enc_in/dec_in: 7 for MS features, 1 for S features
+- `--include-error-predictor` (with `--error-predictor-fit-on {train,val}`).
+- `--include-mc-dropout` (with `--mc-dropout-passes N`; slow, GPU recommended).
 
-### Exchange Rate Dataset
-- data: custom
-- enc_in/dec_in: 8, 1 for S features
+---
 
-### Traffic Dataset
-- data: custom
-- enc_in/dec_in: 862, 1 for S features
+## Batch grid over models × datasets
 
-### Weather Dataset
-- data: custom
-- enc_in/dec_in: 21, 1 for S features
+```bash
+python scripts/run_baseline_compare_grid.py \
+  --checkpoints-root ./checkpoints \
+  --merged-output-dir ./baseline_compare_grid_merged \
+  --models "PatchTST,Autoformer,FEDformer" \
+  --datasets "ETTh2,electricity,weather"
+```
 
-### National Illness Dataset
-- data: custom
-- enc_in/dec_in: 7, 1 for S features
+By default it forwards error-predictor (train-fit) + MC dropout (20 passes) to each subprocess unless you pass `--no-default-baselines`. Optional `--run-and-pause` runs `run_and_pause.py` after the grid.
+
+---
+
+## Other scripts (under `scripts/`)
+
+| Script | Purpose |
+|--------|---------|
+| `plot_ebm_graph_fusion_curves.py` | Plot MSE vs coverage from compare outputs |
+| `export_*_latex.py` / `export_ebm_graph_fusion_unified_table.py` | LaTeX tables from CSVs |
+| `graph_only_selective_analysis.py` | Graph-only selective analysis over a checkpoint tree |
+| `summarize_mse_changes.py` | Summarise MSE deltas |
+
+Generated paper-style fragments may live under `docs/` (`.tex`).
+
+---
+
+## Repository layout (high level)
+
+| Path | Content |
+|------|---------|
+| `exp/` | `Exp_Main_Energy`, training / validation / EBM loops |
+| `energy/` | NeoEBM modules (concat / transformer-style heads) |
+| `models/` | Backbone implementations |
+| `data_provider/` | Loaders, `ExperimentData` |
+| `tem_inferencer.py` | TEM / `test_adhoc_energy`, NPZ-friendly outputs |
+| `utils/graph_energy_gate.py` | Graph energy, calibration, evaluation hooks |
+| `utils/selective_baselines.py` | Error predictor, MC dropout helpers |
+| `analysis/` | Selective metrics helpers used by compare |
+| `scripts/` | CLI entry points |
+| `dataset/` | Input CSVs (not always versioned) |
+
+---
+
+## Notes
+
+- **Multivariate (`M`)**: graph regularisation and graph-gate paths expect multivariate structure; MC dropout in compare currently requires `features == "M"` in `args.csv`.
+- **Logging**: experiments can integrate **ClearML** (`clearml` in requirements); disable or use test mode if you do not need remote logging.
+- **Security**: review any local helpers (e.g. pause / automation scripts) for hard-coded tokens before sharing or running on shared machines.
+
+---
+
+## Citation
+
+If you use this codebase in research, cite the relevant paper or technical report for your project and list this repository URL.
